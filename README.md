@@ -4,6 +4,16 @@
 
 # 游界桥 · PS5Bridge
 
+## [⬇ 下载 Mac 运行版 · v2.5](https://github.com/Ko-Hon/PS5Bridge/releases/download/v2.5/Youjieqiao-2.5-macOS-arm64.zip)
+
+**这是已经编译好的 Mac 应用，无需编译，也不需要安装 Go 或 Xcode。** 下载 ZIP → 解压 → 将“游界桥.app”拖入“应用程序” → 打开应用。
+
+适用于 **Apple Silicon Mac（M 系列芯片）**，构建最低目标 macOS 13。首次打开可能需要在“系统设置 → 隐私与安全性”中允许；开启转发时需在 macOS 弹窗中完成管理员验证。
+
+仓库根目录的 [游界桥-Mac运行版.zip](游界桥-Mac运行版.zip) 也是同一个运行包，进入文件页面后点击下载即可。[版本说明及校验文件](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.5)
+
+---
+
 **让同一 Wi-Fi 下的 PS5，通过 Mac 的网络出口连接全球游戏网络。**
 
 游界桥是一款面向 Apple Silicon Mac 的原生网络转发工具。Mac 和 PS5 连接同一路由器后，将 PS5 的 IPv4 默认网关设为 Mac，便可使用 Mac 上已经建立的 Shadowrocket 等兼容隧道出口，无需另开热点。
