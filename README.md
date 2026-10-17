@@ -4,6 +4,12 @@
 
 # 游界桥 · PS5Bridge
 
+**先在 Mac 用 Shadowrocket（小火箭）连接 VPN，再用游界桥转发 PS5 的流量。**
+
+使用顺序：**Mac 连接 Shadowrocket VPN → 开启游界桥转发 → PS5 默认网关填写 Mac IP**。Mac 和 PS5 连接同一路由器的普通 Wi-Fi，无需另开热点。
+
+游界桥负责将 PS5 的流量交给 Mac 已连接的 VPN／隧道出口。你需要自行准备 VPN 客户端和可用节点，使用期间保持 **Shadowrocket 与游界桥同时运行**。
+
 ## [⬇ 下载 Mac 运行版 · v2.5](https://github.com/Ko-Hon/PS5Bridge/releases/download/v2.5/Youjieqiao-2.5-macOS-arm64.zip)
 
 **这是已经编译好的 Mac 应用，无需编译，也不需要安装 Go 或 Xcode。** 下载 ZIP → 解压 → 将“游界桥.app”拖入“应用程序” → 打开应用。
@@ -14,9 +20,9 @@
 
 ---
 
-**让同一 Wi-Fi 下的 PS5，通过 Mac 的网络出口连接全球游戏网络。**
+**让同一 Wi-Fi 下的 PS5，共享 Mac 上已经连接的 VPN 出口。**
 
-游界桥是一款面向 Apple Silicon Mac 的原生网络转发工具。Mac 和 PS5 连接同一路由器后，将 PS5 的 IPv4 默认网关设为 Mac，便可使用 Mac 上已经建立的 Shadowrocket 等兼容隧道出口，无需另开热点。
+游界桥是一款面向 Apple Silicon Mac 的原生网络转发工具。先在 Mac 上通过 Shadowrocket 建立可用的 VPN／TUN 连接，再开启游界桥并把 PS5 的 IPv4 默认网关设为 Mac，PS5 的 IPv4 TCP/UDP 流量即可经这个出口转发到游戏或视频服务。
 
 当前版本：**2.5 · Build 11**。已在开发者的 Mac 与实体 PS5 上验证通讯；其他网络环境和游戏需自行验证。
 
@@ -35,10 +41,14 @@
 
 ## 工作方式
 
+Mac 端先连接 Shadowrocket VPN，再启动游界桥。PS5 流量的实际路径为：
+
 ```text
-PS5 ── 同一路由器 / Wi-Fi ── Mac（游界桥）── Mac 上的隧道出口 ── 游戏 / 视频服务器
-       默认网关填写 Mac IP
+PS5 → 同一局域网的 Mac（游界桥）→ Shadowrocket VPN / utun → 上游节点 → 游戏 / 视频服务器
+       PS5 的默认网关填写 Mac IP
 ```
+
+当前已验证的出口客户端是 **Shadowrocket**。如果使用其他 SSR／代理客户端，需要它在 Mac 上建立兼容的 VPN／TUN（`utun`）出口；仅开启 HTTP／SOCKS 系统代理不能提供本工具需要的隧道接口，其他客户端尚未逐一实测。哪些目标经过代理节点仍由出口客户端的规则决定，首次验证时可选择全局代理模式。
 
 转发引擎通过 BPF 接收指定设备发给 Mac 的 IPv4 帧，交给 gVisor Netstack 在用户态处理，再使用绑定指定 `utun` 接口的普通套接字连接目标。回包通过 BPF 返回设备。
 
@@ -50,10 +60,12 @@ PS5 ── 同一路由器 / Wi-Fi ── Mac（游界桥）── Mac 上的隧
 
 1. 从 [Releases](https://github.com/Ko-Hon/PS5Bridge/releases/latest) 下载 `Youjieqiao-2.5-macOS-arm64.zip`。
 2. 解压，将“游界桥.app”放入“应用程序”文件夹。
-3. 先在 Mac 连接 Shadowrocket，确认出口能访问目标服务；使用游戏时节点需支持相应 UDP 流量。
+3. **先在 Mac 打开 Shadowrocket，配置可用节点并开启 VPN／TUN 连接**，确认 Mac 已能通过这个出口访问目标服务；使用游戏时节点需支持相应 UDP 流量。
 4. 打开游界桥，在“设置 → 配置 Mac”中选择与 PS5 相同的局域网接口，填写 PS5 当前 IPv4 地址。
 5. 点击顶部“开始转发”，在 **macOS 系统弹窗**中完成管理员验证。
 6. 按“设置 → 设置 PS5”显示的参数手动配置 PS5，再打开 YouTube 或游戏，观察流量和连接。
+
+使用期间，Mac 上的 Shadowrocket VPN 和游界桥转发都需要保持开启。只打开游界桥而未连接可用的 VPN／TUN 出口，无法建立这条转发路径。
 
 发布包使用本地临时签名（ad-hoc），尚未经过 Apple Developer ID 签名和公证。macOS 可能拦截首次打开；确认下载来源后，可按系统提示在“系统设置 → 隐私与安全性”中允许打开。运行应用不需要安装 Go 或 Xcode。
 
