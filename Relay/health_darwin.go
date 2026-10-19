@@ -243,7 +243,52 @@ func vpnHealth(ctx context.Context, ping func(context.Context) (float64, error),
 	return false, false, 0, "Google 连通性检测失败：" + tlsErr.Error()
 }
 
-func runHealth(encoded, vpnName, encodedTargets string) error {
+func healthDeviceTargets(cfg configuration, encoded string) ([]string, error) {
+	if !cfg.AutoDiscover {
+		return cfg.AdditionalClients, nil
+	}
+	if len(encoded) > 4096 {
+		return nil, fmt.Errorf("too many device targets")
+	}
+	var input []string
+	if encoded != "" {
+		b, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(b, &input); err != nil {
+			return nil, err
+		}
+	}
+	gw, err := netip.ParseAddr(cfg.Gateway)
+	if err != nil || !gw.Is4() {
+		return nil, fmt.Errorf("invalid LAN")
+	}
+	mask := net.ParseIP(cfg.Mask).To4()
+	if mask == nil {
+		return nil, fmt.Errorf("invalid mask")
+	}
+	bits, size := net.IPMask(mask).Size()
+	if size != 32 || bits < 8 || bits > 30 {
+		return nil, fmt.Errorf("invalid mask")
+	}
+	subnet := netip.PrefixFrom(gw, bits).Masked()
+	var result []string
+	seen := map[string]bool{}
+	for _, text := range input {
+		ip, err := netip.ParseAddr(text)
+		if err == nil && validLANClient(ip, gw, subnet) && !seen[text] {
+			result = append(result, text)
+			seen[text] = true
+			if len(result) == maxAutoDevices {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func runHealth(encoded, vpnName, encodedTargets, encodedDevices string) error {
 	targets, err := serverTargets(encodedTargets)
 	if err != nil {
 		return err
@@ -254,6 +299,10 @@ func runHealth(encoded, vpnName, encodedTargets string) error {
 	}
 	var cfg configuration
 	if err = json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	deviceTargets, err := healthDeviceTargets(cfg, encodedDevices)
+	if err != nil {
 		return err
 	}
 	report := healthReport{Config: cfg, VPN: vpnName, VPNDetail: "未检测到 VPN 隧道"}
@@ -281,8 +330,8 @@ func runHealth(encoded, vpnName, encodedTargets string) error {
 			report.PS5Latency = n
 		}()
 	}
-	report.Devices = make([]deviceHealth, len(cfg.AdditionalClients))
-	for i, target := range cfg.AdditionalClients {
+	report.Devices = make([]deviceHealth, len(deviceTargets))
+	for i, target := range deviceTargets {
 		ip, err := netip.ParseAddr(target)
 		if !report.LANReady || err != nil || !ip.Is4() || !ip.IsPrivate() {
 			continue

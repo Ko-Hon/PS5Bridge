@@ -50,12 +50,28 @@ func captureFilters(cfg configuration, mac net.HardwareAddr) []syscall.BpfInsn {
 	load(syscall.BPF_H, 4)
 	jump(uint32(binary.BigEndian.Uint16(mac[4:])), "drop", false)
 	load(syscall.BPF_W, 26)
-	for _, text := range cfg.clients() {
-		ip := net.ParseIP(text).To4()
-		if ip == nil {
+	if cfg.AutoDiscover {
+		gw, mask := net.ParseIP(cfg.Gateway).To4(), net.ParseIP(cfg.Mask).To4()
+		if gw == nil || mask == nil {
 			return drop
 		}
-		jump(binary.BigEndian.Uint32(ip), "accept", true)
+		m := binary.BigEndian.Uint32(mask)
+		code = append(code, syscall.BpfInsn{Code: syscall.BPF_ALU | syscall.BPF_AND | syscall.BPF_K, K: m})
+		jump(binary.BigEndian.Uint32(gw)&m, "drop", false)
+		load(syscall.BPF_W, 30)
+		code = append(code, syscall.BpfInsn{Code: syscall.BPF_ALU | syscall.BPF_AND | syscall.BPF_K, K: m})
+		jump(binary.BigEndian.Uint32(gw)&m, "drop", true)
+		load(syscall.BPF_B, 23)
+		jump(6, "accept", true)
+		jump(17, "accept", true)
+	} else {
+		for _, text := range cfg.clients() {
+			ip := net.ParseIP(text).To4()
+			if ip == nil {
+				return drop
+			}
+			jump(binary.BigEndian.Uint32(ip), "accept", true)
+		}
 	}
 	goTo("drop")
 	labels["v6"] = len(code)
@@ -75,6 +91,9 @@ func captureFilters(cfg configuration, mac net.HardwareAddr) []syscall.BpfInsn {
 			}
 			goTo("accept")
 			labels["selectedPeers"] = len(code)
+		}
+		if len(cfg.Peers) > maxAutoDevices {
+			return drop
 		}
 		for i, seed := range cfg.Peers {
 			m, err := net.ParseMAC(seed.MAC)
@@ -230,4 +249,26 @@ func joinIPv6Groups(index int, router netip.Addr) (int, error) {
 		}
 	}
 	return fd, nil
+}
+
+func (e *engine) refreshLinkLocals(text string) {
+	e.peerMu.Lock()
+	defer e.peerMu.Unlock()
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		ip, err := netip.ParseAddr(f[0])
+		if err != nil || !ip.IsLinkLocalUnicast() || ip.Zone() != e.config.Interface {
+			continue
+		}
+		mac, err := parseLANMAC(f[1])
+		if err != nil {
+			continue
+		}
+		if p := e.byMAC[string(mac)]; p != nil {
+			p.linkLocal = ip.WithZone("")
+		}
+	}
 }

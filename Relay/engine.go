@@ -32,6 +32,8 @@ type configuration struct {
 	Client            string     `json:"client"`
 	AdditionalClients []string   `json:"additionalClients,omitempty"`
 	IPv6              bool       `json:"ipv6Enabled,omitempty"`
+	AutoDiscover      bool       `json:"autoDiscover,omitempty"`
+	LANRouter         netip.Addr `json:"-"`
 	Peers             []peerSeed `json:"-"`
 	IPv6Prefixes      []string   `json:"-"`
 	Router            netip.Addr `json:"-"`
@@ -86,7 +88,7 @@ type engine struct {
 
 func newEngine(cfg configuration, mac net.HardwareAddr, dial func(context.Context, string, string) (net.Conn, error), send func([]byte) error) (*engine, error) {
 	client, err := netip.ParseAddr(cfg.Client)
-	if err != nil || !client.Is4() {
+	if !cfg.AutoDiscover && (err != nil || !client.Is4()) {
 		return nil, fmt.Errorf("invalid client IPv4")
 	}
 	gw, err := netip.ParseAddr(cfg.Gateway)
@@ -102,7 +104,7 @@ func newEngine(cfg configuration, mac net.HardwareAddr, dial func(context.Contex
 		return nil, fmt.Errorf("invalid subnet or MAC")
 	}
 	subnet := netip.PrefixFrom(gw, bits).Masked()
-	if !subnet.Contains(client) || client == gw {
+	if !cfg.AutoDiscover && (!subnet.Contains(client) || client == gw) {
 		return nil, fmt.Errorf("client must be on LAN")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -193,6 +195,10 @@ func (e *engine) input(frame []byte) bool {
 		return false
 	}
 	if !dst.IsGlobalUnicast() || dst.IsLoopback() || dst.IsLinkLocalUnicast() {
+		return false
+	}
+	// Invalid packets cannot enroll an automatic client or pin its identity.
+	if proto == ipv4.ProtocolNumber && !validIPv4Packet(ip[:length]) {
 		return false
 	}
 	peer := e.acceptPeer(src, frame[6:12])

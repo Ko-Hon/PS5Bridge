@@ -4,7 +4,7 @@
 
 # 游界桥 · PS5Bridge
 
-> **2.6 预览版**：新增 PS5 与 iPhone 同时转发，IPv4 TCP/UDP 已完成双设备实测。IPv6 转发需要可用的隧道 IPv6 出口，兼容出口下的 iPhone IPv6 路径仍需实测。
+> **2.6.1 预览版**：默认自动接入，无需在 Mac 软件填写设备 IP；设备将网关设为 Mac 后即可尝试使用。IPv6 转发需要可用的隧道 IPv6 出口，兼容出口下的 iPhone IPv6 路径仍需实测。
 
 **先在 Mac 用 Shadowrocket（小火箭）连接 VPN，再用游界桥转发 PS5 的流量。**
 
@@ -12,13 +12,13 @@
 
 游界桥负责将 PS5 的流量交给 Mac 已连接的 VPN／隧道出口。你需要自行准备 VPN 客户端和可用节点，使用期间保持 **Shadowrocket 与游界桥同时运行**。
 
-## [⬇ 下载 2.6 预览运行版](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6-preview.1)
+## [⬇ 下载 2.6.1 预览运行版](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6.1-preview.1)
 
 **这是已经编译好的 Mac 应用，无需编译，也不需要安装 Go 或 Xcode。** 下载 ZIP → 解压 → 将“游界桥.app”拖入“应用程序” → 打开应用。
 
 适用于 **Apple Silicon Mac（M 系列芯片）**，构建最低目标 macOS 13。首次打开可能需要在“系统设置 → 隐私与安全性”中允许；开启转发时需在 macOS 弹窗中完成管理员验证。
 
-稳定版 2.5 的运行包仍可在 [v2.5 下载页](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.5) 获取。2.6 预览包单独提供，包含 iPhone 和 IPv6 配置。
+稳定版 2.5 的运行包仍可在 [v2.5 下载页](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.5) 获取。2.6.1 预览包单独提供，包含 iPhone 和 IPv6 配置。
 
 ---
 
@@ -26,14 +26,14 @@
 
 游界桥是一款面向 Apple Silicon Mac 的原生网络转发工具。先在 Mac 上通过 Shadowrocket 建立可用的 VPN／TUN 连接，再开启游界桥并把 PS5 的 IPv4 默认网关设为 Mac，PS5 的 IPv4 TCP/UDP 流量即可经这个出口转发到游戏或视频服务。
 
-当前预览版本：**2.6 · Build 12**。已在开发者的 Mac、实体 PS5 和 iPhone 上验证 IPv4 同时通讯；其他网络环境和游戏需自行验证。
+当前预览版本：**2.6.1 · Build 13**。2.6 的双设备手动接入已完成实体 IPv4 通讯验证；2.6.1 自动接入已通过双设备回环与隔离测试，实体设备验证待完成系统授权后核对。其他网络环境和游戏需自行验证。
 
-[下载预览版](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6-preview.1) · [下载稳定版](https://github.com/Ko-Hon/PS5Bridge/releases/latest) · [详细使用说明](docs/使用说明.md) · [工作原理](docs/工作原理.md) · [验证记录](docs/验证记录.md) · [反馈问题](https://github.com/Ko-Hon/PS5Bridge/issues)
+[下载预览版](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6.1-preview.1) · [下载稳定版](https://github.com/Ko-Hon/PS5Bridge/releases/latest) · [详细使用说明](docs/使用说明.md) · [工作原理](docs/工作原理.md) · [验证记录](docs/验证记录.md) · [反馈问题](https://github.com/Ko-Hon/PS5Bridge/issues)
 
 ## 它能做什么
 
 - **同网段转发**：Mac 和 PS5 继续使用现有 Wi-Fi，PS5 通过手动网关接入。
-- **双设备同时转发**：PS5 与 iPhone 分别填写 IPv4，各自将网关设为 Mac。回包按设备地址和 MAC 分开，手机有独立状态、流量和 Ping。
+- **自动接入多设备**：设备端将网关设为 Mac，Mac 软件无需填写设备 IP。每次会话最多识别 32 台，分别显示 IP、MAC、收发流量、状态和 Ping。关闭自动接入可使用手动白名单。
 - **IPv4 / IPv6 TCP、UDP**：启用 IPv6 后，先验证指定隧道的 IPv6 HTTPS 出口，再只向选定设备发布短期 IPv6 网关；IPv6 出口未通过时继续运行 IPv4，显示具体原因。
 - **实时监控**：上传／下载速率、本次上传／下载／总流量，以及 PS5、Mac、网络出口的连接状态灯。
 - **通讯检测**：PS5 局域网 Ping、经出口访问 Google 的 Ping 与 HTTPS 耗时。
@@ -61,12 +61,12 @@ PS5 → 同一局域网的 Mac（游界桥）→ Shadowrocket VPN / utun → 上
 
 需要 **Apple Silicon Mac、macOS 13 或更新版本**，以及已建立可用 `utun` 出口的网络客户端。当前发布包仅包含 arm64 版本；最低系统版本来自构建配置，尚未覆盖各 macOS 版本实机验证。
 
-1. 从 [2.6 预览下载页](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6-preview.1) 下载 `Youjieqiao-2.6-preview.1-macOS-arm64.zip`。
+1. 从 [2.6.1 预览下载页](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6.1-preview.1) 下载 `Youjieqiao-2.6.1-preview.1-macOS-arm64.zip`。
 2. 解压，将“游界桥.app”放入“应用程序”文件夹。
 3. **先在 Mac 打开 Shadowrocket，配置可用节点并开启 VPN／TUN 连接**，确认 Mac 已能通过这个出口访问目标服务；使用游戏时节点需支持相应 UDP 流量。
-4. 打开游界桥，在“设置 → 配置 Mac”中选择与 PS5 相同的局域网接口，填写 PS5 当前 IPv4 地址。
+4. 打开游界桥，在“设置 → 配置 Mac”中选择与设备相同的局域网接口，保持“自动接入设备”开启，无需填写设备 IP。
 5. 点击顶部“开始转发”，在 **macOS 系统弹窗**中完成管理员验证。
-6. 按“设置 → 设置 PS5”显示的参数手动配置 PS5，再打开 YouTube 或游戏，观察流量和连接。
+6. 按“设置 → 设置接入设备”显示的参数手动配置 PS5，再打开 YouTube 或游戏，观察流量和连接。
 
 使用期间，Mac 上的 Shadowrocket VPN 和游界桥转发都需要保持开启。只打开游界桥而未连接可用的 VPN／TUN 出口，无法建立这条转发路径。
 
@@ -74,16 +74,18 @@ PS5 → 同一局域网的 Mac（游界桥）→ Shadowrocket VPN / utun → 上
 
 ## iPhone 与 PS5 同时接入
 
-在“设置 → 配置 Mac”中保留 PS5 地址，勾选“同时转发 iPhone”，填写手机当前 Wi-Fi 的 IPv4。在 iPhone “设置 → Wi-Fi → 当前网络旁的 ⓘ → 配置 IP → 手动”中，保留手机自己的 IP 与子网掩码，**路由器填写 Mac IPv4**，HTTP 代理关闭。两台设备使用不同 IP，但网关相同。
+在“设置 → 配置 Mac”选择局域网，保持“自动接入设备”开启。无需填写 PS5、iPhone 或其他设备的地址。在 iPhone “设置 → Wi-Fi → 当前网络旁的 ⓘ → 配置 IP → 手动”中，保留手机自己的 IP 与子网掩码，**路由器填写 Mac IPv4**，HTTP 代理关闭。两台设备使用不同 IP，但网关相同。
 
 同时检查该 Wi-Fi 的“配置 DNS”中有可用服务器；可手动填写 `1.1.1.1`、`8.8.8.8`，并非只能使用这两个地址。保存后重新连接 Wi-Fi，用 Safari 建立新连接，再观察手机自己的收发流量。
+
+自动模式下，同一 MAC 使用新 IPv4 时可自动学习，保留最多 8 个 IPv4 回包映射。地址被其他 MAC 重用、MAC 更换或达到识别上限时，可能需要重新开始转发。IP/MAC 关联不是身份认证，请在可信局域网使用；需要限制接入时可关闭自动接入并配置白名单。
 
 手机和 PS5 可以同时建立连接；监控页分别显示状态，服务器列表标记设备与 IPv4／IPv6。总流量为所有选定设备的合计，设备明细与 IPv6 包数按当前引擎显示，出口重连后这部分明细重新累计。
 
 ## IPv6 转发如何启用
 
 1. 路由器需为当前 LAN 提供 IPv6 /64 前缀，Shadowrocket 或兼容 VPN 需提供可用的 `utun` IPv6 出口。
-2. 停止转发后勾选“启用 IPv6 转发”，再开始。程序通过设备 IPv4 获取其 Wi-Fi MAC，仅处理选定设备。
+2. 停止转发后勾选“启用 IPv6 转发”，再开始。自动模式先从设备 IPv4 转发流量学习 MAC，再向已接入设备提供网关；纯 IPv6 设备暂不支持自动接入。
 3. IPv6 HTTPS 出口验证成功后，向已知设备的链路本地地址发送**IPv6 和以太网均为单播**的路由通告。没有缓存的设备可能需要重新连接一次 Wi-Fi，软件从其路由请求学习链路本地地址。
 4. 通告只复用 LAN 已有前缀，不安装 Mac 路由或修改路由器；虚拟网关先检查地址冲突。停止或出口验证失败时撤回网关，意外退出后默认路由租期最多约 45 秒。
 5. 在“连接状态”查看出口检测原因、已提供网关的设备数与实际 IPv6 上传／回包计数。**仅有 IPv6 开关或 utun 地址，不代表出口可用，也不代表手机已采用网关。**
@@ -94,7 +96,7 @@ VPN 没有 IPv6 路由、节点不能访问 IPv6 目标、Wi-Fi 过滤路由通�
 
 | 项目 | 填写方式 |
 | --- | --- |
-| IP 地址设定 | 手动；与软件中填写的 PS5 地址一致 |
+| IP 地址设定 | 手动；设备自己的有效局域网地址，不与其他设备重复 |
 | 子网掩码 | 与当前局域网一致，按软件显示填写 |
 | 默认网关 | **Mac 的局域网 IPv4 地址** |
 | DNS | 可用的公共 DNS；界面示例为 `1.1.1.1` / `8.8.8.8`，并非强制 |
@@ -105,7 +107,7 @@ VPN 没有 IPv6 路由、节点不能访问 IPv6 目标、Wi-Fi 过滤路由通�
 
 ## 使用边界
 
-- 界面支持 PS5／主设备与一台 iPhone 同时转发，手动填写各自 IPv4；尚无完整的设备扫描、DHCP 管理或 IP 地址跟随。
+- 默认自动接入，每次会话最多识别 32 台设备；仅处理同网段主动发给 Mac 网关的外网流量，不扫描或接管整个局域网。仍不提供 DHCP 或 IP 冲突解决。
 - 支持 IPv4／IPv6 TCP 和 UDP；不提供普通 ICMP 透明转发、UPnP 或入站端口映射。IPv6 邻居发现和路由通告单独处理。健康检测 Ping 由 Mac 发起。
 - IPv6 开关默认关闭。启用需要当前 LAN 已有 IPv6 /64 前缀，且 VPN 的 `utun` 可访问 IPv6 目标。手机是否采用网关取决于系统和网络；请看实际 IPv6 包数，未开启／未采用时 IPv6 仍可能经原路由器。
 - Mac 需要保持唤醒，游界桥与出口客户端需持续运行。当前没有常驻服务、菜单栏后台模式、开机启动或自动更新。
@@ -128,6 +130,7 @@ VPN 没有 IPv6 路由、节点不能访问 IPv6 目标、Wi-Fi 过滤路由通�
 ```sh
 git clone https://github.com/Ko-Hon/PS5Bridge.git
 cd PS5Bridge
+git checkout feature/mobile-ipv6
 ./build.sh
 ```
 

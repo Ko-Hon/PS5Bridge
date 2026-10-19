@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -108,12 +110,16 @@ func run() error {
 		fmt.Println("IPv6 HTTPS 已验证，套接字绑定指定 utun，无 IPv4 回退")
 		return nil
 	}
-	if (len(os.Args) == 4 || len(os.Args) == 5) && os.Args[1] == "--health" {
+	if len(os.Args) >= 4 && len(os.Args) <= 6 && os.Args[1] == "--health" {
 		targets := ""
-		if len(os.Args) == 5 {
+		if len(os.Args) >= 5 {
 			targets = os.Args[4]
 		}
-		return runHealth(os.Args[2], os.Args[3], targets)
+		devices := ""
+		if len(os.Args) == 6 {
+			devices = os.Args[5]
+		}
+		return runHealth(os.Args[2], os.Args[3], targets, devices)
 	}
 	if len(os.Args) != 6 || (os.Args[1] != "--run" && os.Args[1] != "--probe") {
 		return fmt.Errorf("仅支持由桥接软件启动用户态引擎")
@@ -153,7 +159,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if net.ParseIP(cfg.Client).To4() == nil || len(lan.HardwareAddr) != 6 {
+	if (!cfg.AutoDiscover && net.ParseIP(cfg.Client).To4() == nil) || len(lan.HardwareAddr) != 6 {
 		return fmt.Errorf("invalid capture parameters")
 	}
 	if len(cfg.clients()) > 8 {
@@ -165,6 +171,18 @@ func run() error {
 		}
 	}
 	if os.Args[1] == "--run" {
+		if cfg.AutoDiscover {
+			text := localTool("/sbin/route", "-n", "get", "-ifscope", cfg.Interface, "default")
+			for _, line := range strings.Split(text, "\n") {
+				f := strings.Fields(line)
+				if len(f) == 2 && f[0] == "gateway:" {
+					cfg.LANRouter, _ = netip.ParseAddr(f[1])
+				}
+			}
+			if !cfg.LANRouter.Is4() {
+				return fmt.Errorf("无法识别原局域网路由器，请检查 Mac 网络配置")
+			}
+		}
 		if err = prepareIPv6(&cfg, lan); err != nil {
 			return err
 		}
@@ -270,6 +288,7 @@ func run() error {
 					}
 				}
 				if key != lastPeers {
+					e.refreshLinkLocals(localTool("/usr/sbin/ndp", "-an"))
 					if err := syscall.SetBpf(fd, captureFilters(next, lan.HardwareAddr)); err != nil {
 						return fmt.Errorf("更新所选设备 IPv6 捕获范围：%w", err)
 					}

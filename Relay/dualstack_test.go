@@ -37,6 +37,15 @@ func dualConfig() configuration {
 }
 
 func TestTwoDevicesDualStackTCPUDP(t *testing.T) {
+	twoDevicesDualStack(t, false)
+}
+
+func TestAutoDevicesDualStackTCPUDP(t *testing.T) {
+	twoDevicesDualStack(t, true)
+}
+
+func twoDevicesDualStack(t *testing.T, automatic bool) {
+	t.Helper()
 	cfg := dualConfig()
 	type guest struct {
 		stack *stack.Stack
@@ -66,7 +75,14 @@ func TestTwoDevicesDualStackTCPUDP(t *testing.T) {
 		m, _ := net.ParseMAC(cfg.Peers[i].MAC)
 		guests = append(guests, guest{s, link, m})
 	}
-	e, err := newEngine(cfg, mac, func(ctx context.Context, network, address string) (net.Conn, error) {
+	engineConfig := cfg
+	if automatic {
+		engineConfig.AutoDiscover = true
+		engineConfig.Client = ""
+		engineConfig.AdditionalClients = nil
+		engineConfig.Peers = nil
+	}
+	e, err := newEngine(engineConfig, mac, func(ctx context.Context, network, address string) (net.Conn, error) {
 		_, port, _ := net.SplitHostPort(address)
 		host := "127.0.0.1"
 		if network == "tcp6" || network == "udp6" {
@@ -130,86 +146,95 @@ func TestTwoDevicesDualStackTCPUDP(t *testing.T) {
 		pumps.Wait()
 	})
 	var flows sync.WaitGroup
-	for i, g := range guests {
-		for _, family := range []string{"4", "6"} {
-			for _, kind := range []string{"tcp", "udp"} {
-				flows.Add(1)
-				go func(i int, g guest, family, kind string) {
-					defer flows.Done()
-					network := kind + family
-					listen := "127.0.0.1:0"
-					target := "198.51.100.8"
-					proto := ipv4.ProtocolNumber
-					if family == "6" {
-						listen = "[::1]:0"
-						target = "2001:db8::8"
-						proto = ipv6.ProtocolNumber
-					}
-					var port uint16
-					if kind == "tcp" {
-						ln, err := net.Listen(network, listen)
-						if err != nil {
-							t.Error(err)
-							return
+	families := [][]string{{"4", "6"}}
+	if automatic {
+		families = [][]string{{"4"}, {"6"}}
+	}
+	for _, group := range families {
+		for i, g := range guests {
+			for _, family := range group {
+				for _, kind := range []string{"tcp", "udp"} {
+					flows.Add(1)
+					go func(i int, g guest, family, kind string) {
+						defer flows.Done()
+						network := kind + family
+						listen := "127.0.0.1:0"
+						target := "198.51.100.8"
+						proto := ipv4.ProtocolNumber
+						if family == "6" {
+							listen = "[::1]:0"
+							target = "2001:db8::8"
+							proto = ipv6.ProtocolNumber
 						}
-						defer ln.Close()
-						port = uint16(ln.Addr().(*net.TCPAddr).Port)
-						go func() {
-							c, err := ln.Accept()
-							if err == nil {
-								defer c.Close()
-								io.Copy(c, c)
+						var port uint16
+						if kind == "tcp" {
+							ln, err := net.Listen(network, listen)
+							if err != nil {
+								t.Error(err)
+								return
 							}
-						}()
-					} else {
-						pc, err := net.ListenPacket(network, listen)
-						if err != nil {
-							t.Error(err)
-							return
-						}
-						defer pc.Close()
-						port = uint16(pc.LocalAddr().(*net.UDPAddr).Port)
-						go func() {
-							b := make([]byte, 16000)
-							for {
-								n, a, err := pc.ReadFrom(b)
-								if err != nil {
-									return
+							defer ln.Close()
+							port = uint16(ln.Addr().(*net.TCPAddr).Port)
+							go func() {
+								c, err := ln.Accept()
+								if err == nil {
+									defer c.Close()
+									io.Copy(c, c)
 								}
-								pc.WriteTo(b[:n], a)
+							}()
+						} else {
+							pc, err := net.ListenPacket(network, listen)
+							if err != nil {
+								t.Error(err)
+								return
 							}
-						}()
-					}
-					addr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(netip.MustParseAddr(target).AsSlice()), Port: port}
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					var conn net.Conn
-					var err error
-					if kind == "tcp" {
-						conn, err = gonet.DialContextTCP(ctx, g.stack, addr, proto)
-					} else {
-						conn, err = gonet.DialUDP(g.stack, nil, &addr, proto)
-					}
-					if err != nil {
-						t.Errorf("device %d %s: %v", i, network, err)
-						return
-					}
-					defer conn.Close()
-					conn.SetDeadline(time.Now().Add(5 * time.Second))
-					payload := bytes.Repeat([]byte(fmt.Sprintf("device%d-%s/", i, network)), 600)
-					if _, err = conn.Write(payload); err != nil {
-						t.Errorf("device %d %s write: %v", i, network, err)
-						return
-					}
-					b := make([]byte, len(payload))
-					if _, err = io.ReadFull(conn, b); err != nil || !bytes.Equal(b, payload) {
-						t.Errorf("device %d %s incorrect reply: %v", i, network, err)
-					}
-				}(i, g, family, kind)
+							defer pc.Close()
+							port = uint16(pc.LocalAddr().(*net.UDPAddr).Port)
+							go func() {
+								b := make([]byte, 16000)
+								for {
+									n, a, err := pc.ReadFrom(b)
+									if err != nil {
+										return
+									}
+									pc.WriteTo(b[:n], a)
+								}
+							}()
+						}
+						addr := tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFromSlice(netip.MustParseAddr(target).AsSlice()), Port: port}
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						var conn net.Conn
+						var err error
+						if kind == "tcp" {
+							conn, err = gonet.DialContextTCP(ctx, g.stack, addr, proto)
+						} else {
+							conn, err = gonet.DialUDP(g.stack, nil, &addr, proto)
+						}
+						if err != nil {
+							t.Errorf("device %d %s: %v", i, network, err)
+							return
+						}
+						defer conn.Close()
+						conn.SetDeadline(time.Now().Add(5 * time.Second))
+						payload := bytes.Repeat([]byte(fmt.Sprintf("device%d-%s/", i, network)), 600)
+						if _, err = conn.Write(payload); err != nil {
+							t.Errorf("device %d %s write: %v", i, network, err)
+							return
+						}
+						b := make([]byte, len(payload))
+						if _, err = io.ReadFull(conn, b); err != nil || !bytes.Equal(b, payload) {
+							t.Errorf("device %d %s incorrect reply: %v", i, network, err)
+						}
+					}(i, g, family, kind)
+				}
 			}
 		}
+		flows.Wait()
 	}
-	flows.Wait()
+	if len(e.deviceReports()) != 2 {
+		t.Fatal("two devices were not independently admitted")
+	}
 	if e.stats.IPv6Packets.Load() == 0 || e.stats.IPv6Replies.Load() == 0 {
 		t.Fatal("IPv6 did not really flow")
 	}

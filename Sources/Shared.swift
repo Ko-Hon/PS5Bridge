@@ -149,7 +149,9 @@ struct BridgeConfiguration: Codable, Equatable {
     let client: String
     var additionalClients: [String]? = nil
     var ipv6Enabled: Bool? = nil
-    var clients: [String] { [client] + (additionalClients ?? []) }
+    var autoDiscover: Bool? = nil
+    var automatic: Bool { autoDiscover == true }
+    var clients: [String] { automatic ? [] : [client] + (additionalClients ?? []) }
     var dualStack: Bool { ipv6Enabled == true }
     var subnet: String { LANInterface(name: interface, title: "", address: gateway, mask: mask).subnet }
 
@@ -158,12 +160,16 @@ struct BridgeConfiguration: Codable, Equatable {
               inventory.interfaces.contains(where: { $0.name == interface && $0.address == gateway && $0.mask == mask }) else {
             throw BridgeError("Mac 的网络已变化，请刷新后重新选择与 PS5 相同的 Wi-Fi／局域网。")
         }
-        guard let macIP = ipv4(gateway), let clientIP = ipv4(client), let netmask = ipv4(mask), isPrivate(clientIP) else {
-            throw BridgeError("请输入 PS5 当前的局域网 IPv4 地址，例如 192.168.50.100。")
+        guard let macIP = ipv4(gateway), isPrivate(macIP), let netmask = ipv4(mask) else {
+            throw BridgeError("Mac 局域网地址或子网掩码无效。")
         }
         let inverse = ~netmask
         guard netmask.nonzeroBitCount >= 8, netmask.nonzeroBitCount <= 30, inverse & (inverse &+ 1) == 0 else {
             throw BridgeError("当前子网掩码不适用于此网关模式。")
+        }
+        if automatic { return }
+        guard let clientIP = ipv4(client), isPrivate(clientIP) else {
+            throw BridgeError("请输入主设备当前的局域网 IPv4 地址。")
         }
         guard macIP & netmask == clientIP & netmask else { throw BridgeError("PS5 和 Mac 必须处于同一 IPv4 子网。") }
         guard clientIP != macIP, clientIP & inverse != 0, clientIP & inverse != inverse else {
@@ -347,7 +353,7 @@ func ps5Settings(_ config: BridgeConfiguration) -> String {
     """
     PS5：设置 → 网络 → 设置 → 设定互联网连接 → 当前 Wi-Fi → 高级设定
     IP 地址设定：手动
-    IPv4 地址：\(config.client)
+    IPv4 地址：\(config.automatic ? "设备自己的有效局域网地址，各设备不能重复" : config.client)
     子网掩码：\(config.mask)
     默认网关：\(config.gateway)
     首选 DNS：1.1.1.1
@@ -358,6 +364,7 @@ func ps5Settings(_ config: BridgeConfiguration) -> String {
     Mac 和 PS5 保持连接同一个路由器的普通 Wi-Fi，避免访客网络／客户端隔离。
     iPhone：设置 → Wi-Fi → 当前网络旁的 ⓘ → 配置 IP → 手动；填写手机自己的 IPv4、相同子网掩码和 Mac 网关，HTTP 代理关闭。
     iPhone 配置 DNS：确认有可用服务器；可手动填写 1.1.1.1、8.8.8.8（示例，并非强制）。保存后重新连接 Wi-Fi，再用 Safari 验证。
+    接入模式：\(config.automatic ? "自动接入；无需在 Mac 软件填写设备 IP，最多 32 台" : "手动白名单；仅转发已填写的设备")
     同时转发的手机：\((config.additionalClients ?? []).joined(separator: "、"))
     IPv6：\(config.dualStack ? "已启用；先验证隧道 IPv6，再向选定设备提供网关。若等待网关，请重连设备 Wi-Fi。" : "未开启，设备 IPv6 可能经原路由器直连。")
     停止使用后，将各设备的 IP 地址设定和 DNS 设定恢复为自动。
