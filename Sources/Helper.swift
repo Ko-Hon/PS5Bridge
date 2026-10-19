@@ -69,6 +69,10 @@ struct EngineMetrics: Decodable {
     var lastClientAt: Double
     var sequence: UInt64
     var connections: [ForwardConnection]?
+    var devices: [RelayDevice]?
+    var ipv6Status: String?
+    var ipv6Packets: UInt64?
+    var ipv6Replies: UInt64?
 }
 
 final class EngineOutput {
@@ -154,6 +158,8 @@ final class Supervisor {
                         uploadRate: metrics.uploadRate, downloadRate: metrics.downloadRate, lastClientAt: metrics.lastClientAt)
         status.traffic = traffic.value; status.metricsAt = stamp; status.packets = metrics.packets
         status.connections = metrics.connections
+        status.devices = metrics.devices; status.ipv6Status = metrics.ipv6Status
+        status.ipv6Packets = metrics.ipv6Packets; status.ipv6Replies = metrics.ipv6Replies
     }
 
     func launchEngine(_ vpn: VPNInterface, uid: uid_t, gid: gid_t) throws {
@@ -170,12 +176,12 @@ final class Supervisor {
         child.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"]
         child.standardInput = FileHandle.nullDevice; child.standardOutput = pipe; child.standardError = pipe
         try child.run(); engine = child; enginePipe = pipe
-        let deadline = Date().addingTimeInterval(8)
+        let deadline = Date().addingTimeInterval(20)
         while Date() < deadline && !stopRequested {
             let (metrics, errors, _) = output.read()
             if let metrics, metrics.ready, metrics.uid == uid {
                 status.vpn = vpn.name; lastVPN = vpn.name; lastVPNIndex = if_nametoindex(vpn.name)
-                update("running", "用户态转发已开启，等待 PS5 流量。", log: true); return
+                update("running", "用户态转发已开启，等待设备流量。", log: true); return
             }
             if !child.isRunning {
                 stopEngine()
@@ -199,12 +205,18 @@ final class Supervisor {
         guard forwarding == "0" else {
             throw BridgeError("其他软件已开启系统内核转发。请先关闭 macOS 互联网共享或其他网关软件，再启动本应用；本应用不会更改该系统开关。")
         }
+        if status.config.dualStack {
+            let v6 = try checked("/usr/sbin/sysctl", ["-n", "net.inet6.ip6.forwarding"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard v6 == "0" else { throw BridgeError("其他软件已开启系统 IPv6 内核转发，请先关闭对应共享／网关功能。") }
+        }
         let inventory = discover()
         try status.config.validate(against: inventory)
         guard let vpn = inventory.vpn else { throw BridgeError("请先连接 Shadowrocket 的 VPN 隧道。") }
-        guard routeInterface(status.config.client) == status.config.interface else { throw BridgeError("PS5 不在所选局域网接口，请检查 IP。") }
+        for client in status.config.clients {
+            guard routeInterface(client) == status.config.interface else { throw BridgeError("设备 \(client) 不在所选局域网接口，请检查 IP。") }
+        }
         let route = try checked("/sbin/route", ["-n", "get", "-ifscope", status.config.interface, "default"])
-        guard firstMatch("(?m)^\\s*gateway:\\s*(\\S+)", route) != status.config.client else {
+        guard firstMatch("(?m)^\\s*gateway:\\s*(\\S+)", route) .map({ !status.config.clients.contains($0) }) != false else {
             throw BridgeError("填写的是路由器 IP，请填写 PS5 的 IPv4 地址。")
         }
         let awake = Process(); awake.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate"); awake.arguments = ["-i", "-w", String(getpid())]
@@ -221,7 +233,7 @@ final class Supervisor {
             if (try? parentIdentity(status.parentPID)) == nil { break }
             let current = discover()
             guard current.interfaces.contains(where: { $0.name == status.config.interface && $0.address == status.config.gateway && $0.mask == status.config.mask }) else {
-                throw BridgeError("Mac 的局域网地址发生变化，已停止转发，请更新 PS5 设置。")
+                throw BridgeError("Mac 的局域网地址发生变化，已停止转发，请更新设备设置。")
             }
             if current.vpn?.name != lastVPN || (current.vpn.map { if_nametoindex($0.name) } ?? 0) != lastVPNIndex {
                 stopEngine(); lastVPN = ""; lastVPNIndex = 0
@@ -236,11 +248,11 @@ final class Supervisor {
             }
             if let metrics = output.read().0 {
                 consumeMetrics()
-                update("running", "PS5 数据包 \(metrics.packets) · 回包 \(metrics.replies) · TCP \(metrics.tcp) · UDP \(metrics.udp) · 失败 \(metrics.failures)")
+                update("running", "设备数据包 \(metrics.packets) · 回包 \(metrics.replies) · TCP \(metrics.tcp) · UDP \(metrics.udp) · 失败 \(metrics.failures)")
             } else { update("running", status.message) }
         }
         stopEngine()
-        update("stopped", "转发已停止。请将 PS5 的 IP 地址和 DNS 恢复为自动。", log: true)
+        update("stopped", "转发已停止。请将 各设备的 IP 地址和 DNS 恢复为自动。", log: true)
     }
 }
 
@@ -254,7 +266,7 @@ func stopRelay() throws {
     let fd = try acquireLock(); defer { close(fd) }
     if var status = readStatus() {
         status.phase = "stopped"; status.updated = Date().timeIntervalSince1970
-        status.message = "转发已停止。请将 PS5 的 IP 地址和 DNS 恢复为自动。"
+        status.message = "转发已停止。请将 各设备的 IP 地址和 DNS 恢复为自动。"
         try save(status, "status.json", permissions: 0o644)
     }
 }
@@ -295,7 +307,7 @@ func stopRelay() throws {
                 child.executableURL = URL(fileURLWithPath: args[0]); child.arguments = ["--serve-userspace", args[2], args[3]]
                 child.standardInput = FileHandle.nullDevice; child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
                 try child.run()
-                let deadline = Date().addingTimeInterval(13)
+                let deadline = Date().addingTimeInterval(25)
                 while Date() < deadline {
                     if let status = readStatus(), status.helperPID == child.processIdentifier {
                         if status.phase == "running" { print("用户态转发已开启。"); return }

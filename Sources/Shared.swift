@@ -147,6 +147,10 @@ struct BridgeConfiguration: Codable, Equatable {
     let gateway: String
     let mask: String
     let client: String
+    var additionalClients: [String]? = nil
+    var ipv6Enabled: Bool? = nil
+    var clients: [String] { [client] + (additionalClients ?? []) }
+    var dualStack: Bool { ipv6Enabled == true }
     var subnet: String { LANInterface(name: interface, title: "", address: gateway, mask: mask).subnet }
 
     func validate(against inventory: Inventory) throws {
@@ -165,7 +169,15 @@ struct BridgeConfiguration: Codable, Equatable {
         guard clientIP != macIP, clientIP & inverse != 0, clientIP & inverse != inverse else {
             throw BridgeError("PS5 的 IP 不能是 Mac 地址、网络地址或广播地址。")
         }
-        guard !inventory.interfaces.contains(where: { $0.address == client }) else { throw BridgeError("这个 IP 已由 Mac 使用，请填写 PS5 的 IP。") }
+        guard !inventory.interfaces.contains(where: { $0.address == client }) else { throw BridgeError("这个 IP 已由 Mac 使用，请填写设备的 IP。") }
+        guard clients.count <= 8, Set(clients).count == clients.count else { throw BridgeError("设备 IP 不能重复，最多同时 8 台。") }
+        for text in additionalClients ?? [] {
+            guard let address = ipv4(text), isPrivate(address), address & netmask == macIP & netmask,
+                  address != macIP, address & inverse != 0, address & inverse != inverse,
+                  !inventory.interfaces.contains(where: { $0.address == text }) else {
+                throw BridgeError("手机 IP 必须是相同局域网中的有效主机地址，不能填 Mac、路由器或 PS5 的地址。")
+            }
+        }
     }
 }
 
@@ -182,6 +194,10 @@ struct BridgeStatus: Codable {
     var traffic: BridgeTraffic? = nil
     var metricsAt: Double? = nil
     var connections: [ForwardConnection]? = nil
+    var devices: [RelayDevice]? = nil
+    var ipv6Status: String? = nil
+    var ipv6Packets: UInt64? = nil
+    var ipv6Replies: UInt64? = nil
     var running: Bool { ["starting", "running", "paused", "stopping"].contains(phase) }
 }
 
@@ -228,6 +244,7 @@ struct ConnectionHealth: Codable {
     var checkedAt: Double
     var googleHTTPSLatency: Double? = nil
     var serverPings: [ServerPing]? = nil
+    var devices: [DeviceHealth]? = nil
 }
 
 struct ForwardConnection: Codable, Identifiable {
@@ -242,11 +259,28 @@ struct ForwardConnection: Codable, Identifiable {
     var domain: String? = nil
     var domainSource: String? = nil
     var aliases: [String]? = nil
+    var client: String? = nil
     var serverName: String { domain?.isEmpty == false ? domain! : ip }
     var serverDetail: String {
         let names = (aliases ?? []).joined(separator: "、")
-        return "\(ip):\(port)\n\(domainSource ?? "尚未识别域名")\(names.isEmpty ? "" : " · " + names)"
+        return "\(ip.contains(":") ? "[" + ip + "]" : ip):\(port)\n\(domainSource ?? "尚未识别域名")\(names.isEmpty ? "" : " · " + names)"
     }
+}
+
+struct RelayDevice: Codable, Identifiable {
+    var ip: String
+    var mac: String?
+    var linkLocal: String?
+    var uploadBytes: UInt64
+    var downloadBytes: UInt64
+    var lastAt: Double
+    var ipv6Packets: UInt64
+    var id: String { ip }
+}
+struct DeviceHealth: Codable {
+    var ip: String
+    var reachable: Bool
+    var latency: Double
 }
 
 struct ServerPing: Codable {
@@ -322,7 +356,10 @@ func ps5Settings(_ config: BridgeConfiguration) -> String {
     代理服务器：不使用
     
     Mac 和 PS5 保持连接同一个路由器的普通 Wi-Fi，避免访客网络／客户端隔离。
-    本工具转发 IPv4。若 PS5 使用 IPv6，它可能直接经过路由器；要全部走此网关，请关闭路由器该网络的 IPv6。
-    停止使用后，将 PS5 的 IP 地址设定和 DNS 设定恢复为自动。
+    iPhone：设置 → Wi-Fi → 当前网络旁的 ⓘ → 配置 IP → 手动；填写手机自己的 IPv4、相同子网掩码和 Mac 网关，HTTP 代理关闭。
+    iPhone 配置 DNS：确认有可用服务器；可手动填写 1.1.1.1、8.8.8.8（示例，并非强制）。保存后重新连接 Wi-Fi，再用 Safari 验证。
+    同时转发的手机：\((config.additionalClients ?? []).joined(separator: "、"))
+    IPv6：\(config.dualStack ? "已启用；先验证隧道 IPv6，再向选定设备提供网关。若等待网关，请重连设备 Wi-Fi。" : "未开启，设备 IPv6 可能经原路由器直连。")
+    停止使用后，将各设备的 IP 地址设定和 DNS 设定恢复为自动。
     """
 }

@@ -22,6 +22,7 @@ type endpointReport struct {
 	Domain         string   `json:"domain,omitempty"`
 	DomainSource   string   `json:"domainSource,omitempty"`
 	Aliases        []string `json:"aliases,omitempty"`
+	Client         string   `json:"client,omitempty"`
 }
 
 func (r *endpointRegistry) setDomain(key, name, source string) {
@@ -62,10 +63,13 @@ type endpointRegistry struct {
 }
 
 func (r *endpointRegistry) begin(protocol, address string) string {
+	return r.beginFrom(protocol, address, "")
+}
+func (r *endpointRegistry) beginFrom(protocol, address, client string) string {
 	host, port, err := net.SplitHostPort(address)
 	ip, ipErr := netip.ParseAddr(host)
 	p, portErr := strconv.ParseUint(port, 10, 16)
-	if err != nil || ipErr != nil || !ip.Is4() || portErr != nil || p == 0 || (protocol != "TCP" && protocol != "UDP") {
+	if err != nil || ipErr != nil || !ip.IsGlobalUnicast() || portErr != nil || p == 0 || (protocol != "TCP" && protocol != "UDP") {
 		return ""
 	}
 	r.mu.Lock()
@@ -75,9 +79,12 @@ func (r *endpointRegistry) begin(protocol, address string) string {
 	}
 	r.prune(time.Now())
 	key := protocol + "/" + address
+	if client != "" {
+		key = client + "/" + key
+	}
 	e := r.entries[key]
 	if e == nil {
-		e = &endpointReport{ID: key, Protocol: protocol, IP: ip.String(), Port: uint16(p)}
+		e = &endpointReport{ID: key, Protocol: protocol, IP: ip.String(), Port: uint16(p), Client: client}
 		r.entries[key] = e
 	}
 	e.Active++

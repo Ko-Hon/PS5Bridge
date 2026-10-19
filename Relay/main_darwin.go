@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,21 +16,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-func captureFilter(client net.IP, mac net.HardwareAddr) []syscall.BpfInsn {
-	return []syscall.BpfInsn{
-		{Code: syscall.BPF_LD | syscall.BPF_H | syscall.BPF_ABS, K: 12},
-		{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: 0x0800, Jf: 7},
-		{Code: syscall.BPF_LD | syscall.BPF_W | syscall.BPF_ABS, K: 26},
-		{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: binary.BigEndian.Uint32(client.To4()), Jf: 5},
-		{Code: syscall.BPF_LD | syscall.BPF_W | syscall.BPF_ABS, K: 0},
-		{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: binary.BigEndian.Uint32(mac[:4]), Jf: 3},
-		{Code: syscall.BPF_LD | syscall.BPF_H | syscall.BPF_ABS, K: 4},
-		{Code: syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, K: uint32(binary.BigEndian.Uint16(mac[4:])), Jf: 1},
-		{Code: syscall.BPF_RET | syscall.BPF_K, K: 65535},
-		{Code: syscall.BPF_RET | syscall.BPF_K, K: 0},
-	}
-}
 
 func openCapture(cfg configuration, mac net.HardwareAddr, probe bool) (int, int, error) {
 	fd := -1
@@ -72,7 +56,7 @@ func openCapture(cfg configuration, mac net.HardwareAddr, probe bool) (int, int,
 	if err := unix.IoctlSetPointerInt(fd, unix.BIOCSSEESENT, 0); err != nil {
 		return fail(err)
 	}
-	filter := captureFilter(net.ParseIP(cfg.Client), mac)
+	filter := captureFilters(cfg, mac)
 	if probe {
 		filter = []syscall.BpfInsn{{Code: syscall.BPF_RET | syscall.BPF_K, K: 0}}
 	}
@@ -92,7 +76,13 @@ func openCapture(cfg configuration, mac net.HardwareAddr, probe bool) (int, int,
 func vpnDialer(index int) func(context.Context, string, string) (net.Conn, error) {
 	d := net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second, Control: func(network, address string, c syscall.RawConn) error {
 		var result error
-		if err := c.Control(func(fd uintptr) { result = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, index) }); err != nil {
+		if err := c.Control(func(fd uintptr) {
+			if network == "tcp6" || network == "udp6" {
+				result = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_BOUND_IF, index)
+			} else {
+				result = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, index)
+			}
+		}); err != nil {
 			return err
 		}
 		return result
@@ -101,6 +91,23 @@ func vpnDialer(index int) func(context.Context, string, string) (net.Conn, error
 }
 
 func run() error {
+	if len(os.Args) == 3 && os.Args[1] == "--ipv6-check" {
+		name := os.Args[2]
+		if len(name) < 5 || name[:4] != "utun" {
+			return fmt.Errorf("需要指定 utun 出口")
+		}
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+		defer cancel()
+		if err = probeIPv6(ctx, vpnDialer(iface.Index)); err != nil {
+			return err
+		}
+		fmt.Println("IPv6 HTTPS 已验证，套接字绑定指定 utun，无 IPv4 回退")
+		return nil
+	}
 	if (len(os.Args) == 4 || len(os.Args) == 5) && os.Args[1] == "--health" {
 		targets := ""
 		if len(os.Args) == 5 {
@@ -149,6 +156,19 @@ func run() error {
 	if net.ParseIP(cfg.Client).To4() == nil || len(lan.HardwareAddr) != 6 {
 		return fmt.Errorf("invalid capture parameters")
 	}
+	if len(cfg.clients()) > 8 {
+		return fmt.Errorf("设备过多")
+	}
+	for _, client := range cfg.clients() {
+		if net.ParseIP(client).To4() == nil {
+			return fmt.Errorf("invalid client IPv4")
+		}
+	}
+	if os.Args[1] == "--run" {
+		if err = prepareIPv6(&cfg, lan); err != nil {
+			return err
+		}
+	}
 	fd, size, err := openCapture(cfg, lan.HardwareAddr, os.Args[1] == "--probe")
 	if err != nil {
 		return err
@@ -175,6 +195,19 @@ func run() error {
 		return err
 	}
 	defer e.close()
+	if cfg.IPv6 {
+		cfg.Router = e.v6Router
+		if err := syscall.SetBpf(fd, captureFilters(cfg, lan.HardwareAddr)); err != nil {
+			return err
+		}
+		groupFD, err := joinIPv6Groups(lan.Index, e.v6Router)
+		if err != nil {
+			return fmt.Errorf("IPv6 邻居发现组加入失败：%w", err)
+		}
+		defer unix.Close(groupFD)
+		e.v6Done = make(chan struct{})
+		go e.runIPv6()
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer cancel()
 	enc := json.NewEncoder(os.Stdout)
@@ -190,12 +223,13 @@ func run() error {
 			downRate = float64(download-lastDownload) / elapsed
 		}
 		sequence++
-		enc.Encode(map[string]any{"ready": true, "packets": e.stats.Packets.Load(), "replies": e.stats.Replies.Load(), "tcp": e.stats.TCP.Load(), "udp": e.stats.UDP.Load(), "failures": e.stats.Failures.Load(), "uid": os.Geteuid(), "uploadBytes": upload, "downloadBytes": download, "uploadRate": upRate, "downloadRate": downRate, "lastClientAt": float64(e.stats.LastClientAt.Load()) / 1000, "sequence": sequence, "connections": e.connectionReports()})
+		enc.Encode(map[string]any{"ready": true, "packets": e.stats.Packets.Load(), "replies": e.stats.Replies.Load(), "tcp": e.stats.TCP.Load(), "udp": e.stats.UDP.Load(), "failures": e.stats.Failures.Load(), "uid": os.Geteuid(), "uploadBytes": upload, "downloadBytes": download, "uploadRate": upRate, "downloadRate": downRate, "lastClientAt": float64(e.stats.LastClientAt.Load()) / 1000, "sequence": sequence, "connections": e.connectionReports(), "devices": e.deviceReports(), "ipv6Status": e.ipv6Status(), "ipv6Packets": e.stats.IPv6Packets.Load(), "ipv6Replies": e.stats.IPv6Replies.Load()})
 		lastSample, lastUpload, lastDownload = now, upload, download
 	}
 	emit()
 	defer func() { e.close(); emit() }()
 	last := time.Now()
+	lastPeers := ""
 	buf := make([]byte, size)
 	for ctx.Err() == nil {
 		if os.Getppid() != parentPID {
@@ -225,6 +259,23 @@ func run() error {
 			}
 		}
 		if time.Since(last) >= time.Second {
+			if cfg.IPv6 {
+				next := cfg
+				next.Peers = nil
+				key := ""
+				for _, peer := range e.deviceReports() {
+					if peer.MAC != "" {
+						next.Peers = append(next.Peers, peerSeed{IP: peer.IP, MAC: peer.MAC})
+						key += peer.IP + "/" + peer.MAC + ";"
+					}
+				}
+				if key != lastPeers {
+					if err := syscall.SetBpf(fd, captureFilters(next, lan.HardwareAddr)); err != nil {
+						return fmt.Errorf("更新所选设备 IPv6 捕获范围：%w", err)
+					}
+					lastPeers = key
+				}
+			}
 			emit()
 			last = time.Now()
 		}

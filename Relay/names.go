@@ -193,6 +193,8 @@ func (d *dnsObserver) reply(b []byte) {
 			switch body := a.Body.(type) {
 			case *dnsmessage.AResource:
 				d.cache.put(netip.AddrFrom4(body.A).String(), q.name, min(chainTTL, a.Header.TTL), time.Now())
+			case *dnsmessage.AAAAResource:
+				d.cache.put(netip.AddrFrom16(body.AAAA).String(), q.name, min(chainTTL, a.Header.TTL), time.Now())
 			case *dnsmessage.CNAMEResource:
 				next = cleanHostname(body.CNAME.String())
 				chainTTL = min(chainTTL, a.Header.TTL)

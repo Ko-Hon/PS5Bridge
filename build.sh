@@ -23,12 +23,12 @@ cat > "$TASK_APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>游界桥</string>
 <key>CFBundleDisplayName</key><string>游界桥</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.5</string>
-<key>CFBundleVersion</key><string>11</string>
+<key>CFBundleShortVersionString</key><string>2.6</string>
+<key>CFBundleVersion</key><string>12</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
-<key>NSLocalNetworkUsageDescription</key><string>将同一 Wi-Fi 中指定 PS5 的 IPv4 流量通过这台 Mac 转发到全球游戏网络。</string>
+<key>NSLocalNetworkUsageDescription</key><string>将同一 Wi-Fi 中指定 PS5 和手机的 IPv4／IPv6 流量通过这台 Mac 转发到全球游戏网络。</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 </dict></plist>
 PLIST

@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -25,10 +26,15 @@ import (
 )
 
 type configuration struct {
-	Interface string `json:"interface"`
-	Gateway   string `json:"gateway"`
-	Mask      string `json:"mask"`
-	Client    string `json:"client"`
+	Interface         string     `json:"interface"`
+	Gateway           string     `json:"gateway"`
+	Mask              string     `json:"mask"`
+	Client            string     `json:"client"`
+	AdditionalClients []string   `json:"additionalClients,omitempty"`
+	IPv6              bool       `json:"ipv6Enabled,omitempty"`
+	Peers             []peerSeed `json:"-"`
+	IPv6Prefixes      []string   `json:"-"`
+	Router            netip.Addr `json:"-"`
 }
 
 type counters struct {
@@ -40,29 +46,42 @@ type counters struct {
 	UploadBytes   atomic.Uint64
 	DownloadBytes atomic.Uint64
 	LastClientAt  atomic.Int64
+	IPv6Packets   atomic.Uint64
+	IPv6Replies   atomic.Uint64
 }
 
 type engine struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	s          *stack.Stack
-	link       *channel.Endpoint
-	config     configuration
-	client     netip.Addr
-	subnet     netip.Prefix
-	mac        net.HardwareAddr
-	peerMu     sync.Mutex
-	peer       net.HardwareAddr
-	dial       func(context.Context, string, string) (net.Conn, error)
-	send       func([]byte) error
-	slots      chan struct{}
-	connsMu    sync.Mutex
-	conns      map[net.Conn]struct{}
-	stats      counters
-	endpoints  endpointRegistry
-	names      nameCache
-	outputDone chan struct{}
-	closeOnce  sync.Once
+	ctx           context.Context
+	cancel        context.CancelFunc
+	s             *stack.Stack
+	link          *channel.Endpoint
+	config        configuration
+	client        netip.Addr
+	subnet        netip.Prefix
+	mac           net.HardwareAddr
+	peerMu        sync.Mutex
+	devices       map[netip.Addr]*devicePeer
+	addresses     map[netip.Addr]*devicePeer
+	byMAC         map[string]*devicePeer
+	clientGateway netip.Addr
+	v6Prefixes    []netip.Prefix
+	v6Router      netip.Addr
+	v6Ready       atomic.Bool
+	v6Done        chan struct{}
+	v6DAD         atomic.Bool
+	v6Conflict    atomic.Bool
+	v6Mu          sync.Mutex
+	v6Error       string
+	dial          func(context.Context, string, string) (net.Conn, error)
+	send          func([]byte) error
+	slots         chan struct{}
+	connsMu       sync.Mutex
+	conns         map[net.Conn]struct{}
+	stats         counters
+	endpoints     endpointRegistry
+	names         nameCache
+	outputDone    chan struct{}
+	closeOnce     sync.Once
 }
 
 func newEngine(cfg configuration, mac net.HardwareAddr, dial func(context.Context, string, string) (net.Conn, error), send func([]byte) error) (*engine, error) {
@@ -88,13 +107,22 @@ func newEngine(cfg configuration, mac net.HardwareAddr, dial func(context.Contex
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &engine{ctx: ctx, cancel: cancel, config: cfg, client: client, subnet: subnet, mac: append(net.HardwareAddr(nil), mac...), dial: dial, send: send, slots: make(chan struct{}, 512), conns: make(map[net.Conn]struct{}), outputDone: make(chan struct{})}
-	e.link = channel.New(1024, 1400, "")
-	e.s = stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}})
+	e.clientGateway = gw
+	if err := e.initDevices(); err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := e.initIPv6(); err != nil {
+		cancel()
+		return nil, err
+	}
+	e.link = channel.New(1024, 1280, "")
+	e.s = stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}})
 	if err := e.s.CreateNIC(1, e.link); err != nil {
 		cancel()
 		return nil, fmt.Errorf("CreateNIC: %s", err)
 	}
-	e.s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}})
+	e.s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}, {Destination: header.IPv6EmptySubnet, NIC: 1}})
 	go e.output()
 	if err := e.s.SetPromiscuousMode(1, true); err != nil {
 		e.close()
@@ -111,46 +139,112 @@ func newEngine(cfg configuration, mac net.HardwareAddr, dial func(context.Contex
 	return e, nil
 }
 
-// Only the selected console's IPv4 frames addressed to this Mac enter Netstack.
-// Local LAN traffic stays with the OS; the capture interface is never promiscuous.
+// Only selected devices enter Netstack; the physical NIC is never promiscuous.
 func (e *engine) input(frame []byte) bool {
-	if len(frame) < 34 || !bytes.Equal(frame[:6], e.mac) || binary.BigEndian.Uint16(frame[12:14]) != 0x0800 {
+	if len(frame) < 34 || e.ctx.Err() != nil {
 		return false
 	}
 	ip := frame[14:]
-	hlen := int(ip[0]&15) * 4
-	if ip[0]>>4 != 4 || hlen < 20 || len(ip) < hlen {
+	etherType := binary.BigEndian.Uint16(frame[12:14])
+	var src, dst netip.Addr
+	var proto tcpip.NetworkProtocolNumber
+	var length int
+	switch etherType {
+	case 0x0800:
+		if !bytes.Equal(frame[:6], e.mac) || ip[0]>>4 != 4 {
+			return false
+		}
+		hlen := int(ip[0]&15) * 4
+		length = int(binary.BigEndian.Uint16(ip[2:4]))
+		if hlen < 20 || length < hlen || length > len(ip) || (ip[9] != 6 && ip[9] != 17) {
+			return false
+		}
+		src = netip.AddrFrom4([4]byte(ip[12:16]))
+		dst = netip.AddrFrom4([4]byte(ip[16:20]))
+		if e.subnet.Contains(dst) {
+			return false
+		}
+		proto = ipv4.ProtocolNumber
+	case 0x86dd:
+		if !e.config.IPv6 || len(ip) < 40 || ip[0]>>4 != 6 {
+			return false
+		}
+		length = 40 + int(binary.BigEndian.Uint16(ip[4:6]))
+		if length > len(ip) {
+			return false
+		}
+		ip = ip[:length]
+		if ip[6] == 58 {
+			if e.observeDAD(frame, ip) {
+				return true
+			}
+			return e.ipv6Control(frame, ip)
+		}
+		if !e.v6Ready.Load() || !bytes.Equal(frame[:6], e.mac) || !ipv6Transport(ip) {
+			return false
+		}
+		src = netip.AddrFrom16([16]byte(ip[8:24]))
+		dst = netip.AddrFrom16([16]byte(ip[24:40]))
+		if dst.Is4In6() || e.onIPv6LAN(dst) {
+			return false
+		}
+		proto = ipv6.ProtocolNumber
+	default:
 		return false
 	}
-	length := int(binary.BigEndian.Uint16(ip[2:4]))
-	if length < hlen || length > len(ip) {
+	if !dst.IsGlobalUnicast() || dst.IsLoopback() || dst.IsLinkLocalUnicast() {
 		return false
 	}
-	src := netip.AddrFrom4([4]byte(ip[12:16]))
-	dst := netip.AddrFrom4([4]byte(ip[16:20]))
-	if src != e.client || !dst.IsGlobalUnicast() || dst.IsLoopback() || dst.IsLinkLocalUnicast() || e.subnet.Contains(dst) || (ip[9] != 6 && ip[9] != 17) {
-		return false
-	}
-	sourceMAC := frame[6:12]
-	if sourceMAC[0]&1 != 0 || bytes.Equal(sourceMAC, e.mac) || bytes.Equal(sourceMAC, make([]byte, 6)) {
-		return false
-	}
-	e.peerMu.Lock()
-	if e.peer == nil {
-		e.peer = append(net.HardwareAddr(nil), sourceMAC...)
-	}
-	samePeer := bytes.Equal(e.peer, sourceMAC)
-	e.peerMu.Unlock()
-	if !samePeer || e.ctx.Err() != nil {
+	peer := e.acceptPeer(src, frame[6:12])
+	if peer == nil {
 		return false
 	}
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), ip[:length]...))})
-	e.link.InjectInbound(ipv4.ProtocolNumber, pkt)
+	e.link.InjectInbound(proto, pkt)
 	pkt.DecRef()
 	e.stats.Packets.Add(1)
 	e.stats.UploadBytes.Add(uint64(length))
-	e.stats.LastClientAt.Store(time.Now().UnixMilli())
+	peer.upload.Add(uint64(length))
+	now := time.Now().UnixMilli()
+	e.stats.LastClientAt.Store(now)
+	peer.last.Store(now)
+	if proto == ipv6.ProtocolNumber {
+		e.stats.IPv6Packets.Add(1)
+		peer.v6packets.Add(1)
+	}
 	return true
+}
+
+// Bound extension parsing before handing packets to the IPv6 implementation.
+func ipv6Transport(ip []byte) bool {
+	next, offset := ip[6], 40
+	for i := 0; i < 8; i++ {
+		switch next {
+		case 6, 17:
+			return true
+		case 44:
+			if offset+8 > len(ip) {
+				return false
+			}
+			// Subsequent fragments contain no complete transport header.
+			if binary.BigEndian.Uint16(ip[offset+2:])&0xfff8 != 0 {
+				return ip[offset] == 6 || ip[offset] == 17
+			}
+			next, offset = ip[offset], offset+8
+		case 0, 60:
+			if offset+2 > len(ip) {
+				return false
+			}
+			n := (int(ip[offset+1]) + 1) * 8
+			if offset+n > len(ip) {
+				return false
+			}
+			next, offset = ip[offset], offset+n
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (e *engine) output() {
@@ -164,27 +258,60 @@ func (e *engine) output() {
 		ip := append([]byte(nil), v.AsSlice()...)
 		v.Release()
 		pkt.DecRef()
-		if len(ip) < 20 || netip.AddrFrom4([4]byte(ip[16:20])) != e.client {
+		if len(ip) < 20 {
 			continue
 		}
+		etherType := uint16(0x0800)
+		dst := netip.AddrFrom4([4]byte(ip[16:20]))
+		if ip[0]>>4 == 6 {
+			if len(ip) < 40 {
+				continue
+			}
+			etherType = 0x86dd
+			dst = netip.AddrFrom16([16]byte(ip[24:40]))
+		}
 		e.peerMu.Lock()
-		peer := append([]byte(nil), e.peer...)
+		peer := e.addresses[dst]
+		var mac net.HardwareAddr
+		if peer != nil {
+			mac = append(net.HardwareAddr(nil), peer.mac...)
+		}
 		e.peerMu.Unlock()
-		if len(peer) != 6 {
+		if len(mac) != 6 {
 			continue
 		}
 		frame := make([]byte, 14+len(ip))
-		copy(frame[:6], peer)
-		copy(frame[6:12], e.mac)
-		binary.BigEndian.PutUint16(frame[12:14], 0x0800)
+		copy(frame, mac)
+		copy(frame[6:], e.mac)
+		binary.BigEndian.PutUint16(frame[12:], etherType)
 		copy(frame[14:], ip)
 		if err := e.send(frame); err != nil {
 			e.stats.Failures.Add(1)
 		} else {
 			e.stats.Replies.Add(1)
 			e.stats.DownloadBytes.Add(uint64(len(ip)))
+			peer.download.Add(uint64(len(ip)))
+			if etherType == 0x86dd {
+				e.stats.IPv6Replies.Add(1)
+			}
 		}
 	}
+}
+
+func flowNetwork(id stack.TransportEndpointID, transport string) string {
+	if id.LocalAddress.Len() == 16 {
+		return transport + "6"
+	}
+	return transport + "4"
+}
+func (e *engine) sourceDevice(addr tcpip.Address) string {
+	ip, _ := netip.AddrFromSlice(addr.AsSlice())
+	e.peerMu.Lock()
+	defer e.peerMu.Unlock()
+	if p := e.addresses[ip]; p != nil {
+		return p.ip.String()
+	}
+	return ip.String()
 }
 
 func (e *engine) acquire() bool {
@@ -224,10 +351,10 @@ func (e *engine) forwardTCP(r *tcp.ForwarderRequest) {
 	go func() {
 		defer func() { <-e.slots }()
 		target := address(r.ID())
-		key := e.endpoints.begin("TCP", target)
+		key := e.endpoints.beginFrom("TCP", target, e.sourceDevice(r.ID().RemoteAddress))
 		defer e.endpoints.finish(key)
 		began := time.Now()
-		host, err := e.dial(e.ctx, "tcp4", target)
+		host, err := e.dial(e.ctx, flowNetwork(r.ID(), "tcp"), target)
 		e.endpoints.dialResult(key, time.Since(began), err)
 		if err != nil {
 			e.stats.Failures.Add(1)
@@ -299,9 +426,9 @@ func (e *engine) forwardUDP(r *udp.ForwarderRequest) bool {
 		}
 		defer e.untrack(guest)
 		target := address(r.ID())
-		key := e.endpoints.begin("UDP", target)
+		key := e.endpoints.beginFrom("UDP", target, e.sourceDevice(r.ID().RemoteAddress))
 		defer e.endpoints.finish(key)
-		host, err := e.dial(e.ctx, "udp4", target)
+		host, err := e.dial(e.ctx, flowNetwork(r.ID(), "udp"), target)
 		e.endpoints.dialResult(key, 0, err)
 		if err != nil {
 			e.stats.Failures.Add(1)
@@ -362,6 +489,10 @@ func (e *engine) forwardUDP(r *udp.ForwarderRequest) bool {
 func (e *engine) close() {
 	e.closeOnce.Do(func() {
 		e.cancel()
+		if e.v6Done != nil {
+			<-e.v6Done
+		}
+		e.advertiseIPv6(true)
 		e.connsMu.Lock()
 		for c := range e.conns {
 			c.Close()

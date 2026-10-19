@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
     @Published var inventory = Inventory(interfaces: [], vpn: nil, routeInterface: "")
     @Published var interfaceName = UserDefaults.standard.string(forKey: "interface") ?? ""
     @Published var clientIP = UserDefaults.standard.string(forKey: "clientIP") ?? ""
+    @Published var phoneEnabled = UserDefaults.standard.bool(forKey: "phoneEnabled")
+    @Published var phoneIP = UserDefaults.standard.string(forKey: "phoneIP") ?? ""
+    @Published var ipv6Enabled = UserDefaults.standard.bool(forKey: "ipv6Enabled")
     @Published var status: BridgeStatus?
     @Published var busy = false
     @Published var errorMessage: String?
@@ -33,7 +36,9 @@ import UniformTypeIdentifiers
     var config: BridgeConfiguration? {
         guard let lan = selectedLAN else { return nil }
         return BridgeConfiguration(interface: lan.name, gateway: lan.address, mask: lan.mask,
-                                   client: clientIP.trimmingCharacters(in: .whitespacesAndNewlines))
+                                   client: clientIP.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   additionalClients: phoneEnabled ? [phoneIP.trimmingCharacters(in: .whitespacesAndNewlines)] : nil,
+                                   ipv6Enabled: ipv6Enabled ? true : nil)
     }
     var displayedConfig: BridgeConfiguration? { active ? status?.config : config }
     var traffic: BridgeTraffic { status?.traffic ?? BridgeTraffic() }
@@ -57,7 +62,11 @@ import UniformTypeIdentifiers
               recently(health.checkedAt, now: tickTime, seconds: 15) else { return nil }
         return health
     }
-    var recentPS5Traffic: Bool { status?.config == displayedConfig && recently(traffic.lastClientAt, now: tickTime, seconds: 30) }
+    var recentPS5Traffic: Bool {
+        guard status?.config == displayedConfig, ratesFresh else { return false }
+        let stamp = status?.devices == nil ? traffic.lastClientAt : (status?.devices?.first { $0.ip == displayedConfig?.client }?.lastAt ?? 0)
+        return recently(stamp, now: tickTime, seconds: 30)
+    }
     var ps5Online: Bool { matchedHealth?.ps5Reachable == true || recentPS5Traffic }
     var macOnline: Bool { selectedLAN != nil && ratesFresh && matchedHealth?.lanReady != false }
     var vpnOnline: Bool {
@@ -91,9 +100,23 @@ import UniformTypeIdentifiers
         do { try config.validate(against: inventory); return nil }
         catch { return error.localizedDescription }
     }
+    var phoneAddress: String { displayedConfig?.additionalClients?.first ?? "" }
+    var phoneReport: RelayDevice? { status?.devices?.first { $0.ip == phoneAddress } }
+    var phoneHealth: DeviceHealth? { matchedHealth?.devices?.first { $0.ip == phoneAddress } }
+    var phoneOnline: Bool { (ratesFresh && recently(phoneReport?.lastAt ?? 0, now: tickTime, seconds: 30)) || phoneHealth?.reachable == true }
+    var phoneLatency: String { phoneHealth?.reachable == true ? formatLatency(phoneHealth?.latency) : "无响应" }
+    var connectionSummary: String {
+        var states = [ps5Online, macOnline, vpnOnline]
+        if !phoneAddress.isEmpty { states.append(phoneOnline) }
+        return "\(states.filter { $0 }.count)/\(states.count) 已连接"
+    }
     var phaseTitle: String {
         if busy { return "正在处理…" }
-        if active { return status?.phase == "paused" ? "转发已暂停" : "IPv4 转发已开启" }
+        if active {
+            if status?.phase == "paused" { return "转发已暂停" }
+            if status?.config.dualStack == true { return status?.ipv6Status?.hasPrefix("出口已验证") == true ? "IPv4／IPv6 转发运行中" : "IPv4 转发运行中 · IPv6 待就绪" }
+            return "IPv4 转发已开启"
+        }
         return inventory.vpn == nil ? "请先连接 Shadowrocket" : "准备就绪"
     }
     var phaseColor: Color {
@@ -112,7 +135,12 @@ import UniformTypeIdentifiers
             let (freshInventory, freshStatus) = await Task.detached { (discoverNow ? discover() : cachedInventory, readStatus()) }.value
             inventory = freshInventory; status = freshStatus
             if !inventory.interfaces.contains(where: { $0.name == interfaceName }) { interfaceName = inventory.interfaces.first?.name ?? "" }
-            if active, let current = status { clientIP = current.config.client; interfaceName = current.config.interface }
+            if active, let current = status {
+                clientIP = current.config.client; interfaceName = current.config.interface
+                phoneEnabled = !(current.config.additionalClients ?? []).isEmpty
+                phoneIP = current.config.additionalClients?.first ?? phoneIP
+                ipv6Enabled = current.config.dualStack
+            }
             refreshing = false
             refreshHealth()
         }
@@ -146,6 +174,9 @@ import UniformTypeIdentifiers
             let encoded = try JSONEncoder().encode(config).base64EncodedString()
             UserDefaults.standard.set(config.client, forKey: "clientIP")
             UserDefaults.standard.set(config.interface, forKey: "interface")
+            UserDefaults.standard.set(phoneEnabled, forKey: "phoneEnabled")
+            UserDefaults.standard.set(phoneIP, forKey: "phoneIP")
+            UserDefaults.standard.set(ipv6Enabled, forKey: "ipv6Enabled")
             executePrivileged(["--start-userspace", encoded, String(getpid())])
         } catch { errorMessage = error.localizedDescription }
     }
@@ -184,7 +215,7 @@ import UniformTypeIdentifiers
         func quoteShell(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let shellCommand = ([helper] + arguments).map(quoteShell).joined(separator: " ")
         let appleString = shellCommand.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(appleString)\" with administrator privileges with prompt \"游界桥需要打开指定 PS5 的网络捕获接口。\""
+        let script = "do shell script \"\(appleString)\" with administrator privileges with prompt \"游界桥需要打开指定 PS5 和手机的网络捕获接口。\""
         busy = true
         Task {
             let result: Result<CommandResult, Error> = await Task.detached {
@@ -215,7 +246,7 @@ import UniformTypeIdentifiers
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let inventoryJSON = (try? JSONEncoder().encode(inventory)).map { String(decoding: $0, as: UTF8.self) } ?? ""
         let connectionText = connections.map { "\($0.protocol) \($0.serverName):\($0.port) [\($0.ip) · \($0.domainSource ?? "IP")] · 活跃 \($0.active) · Ping \(serverLatencyText($0.ip)) · TCP 建连 \(formatLatency($0.connectLatency))" }.joined(separator: "\n")
-        let text = "游界桥 2.5\n\(Date())\n\n引擎：用户态 TCP／UDP；指定网络出口绑定；不启用系统内核转发\n\n网络检测：\n\(inventoryJSON)\n\n状态灯：PS5 \(ps5Detail)；Mac \(macDetail)；网络出口 \(matchedHealth?.vpnDetail ?? vpnDetail)\n\n延迟：Mac → PS5 Ping \(ps5LatencyText)；经网络出口 → 8.8.8.8 Ping \(googleLatencyText)；Google HTTPS \(formatLatency(matchedHealth?.googleHTTPSLatency))\n\n目标连接（最多 12 个；Ping 可能由网络出口代答；TCP 建连不是游戏 RTT）：\n\(connectionText)\n\n本次流量：上传 \(traffic.uploadBytes) B；下载 \(traffic.downloadBytes) B；合计 \(traffic.totalBytes) B\n\n状态：\n\(status?.message ?? "尚未启动")\n\n日志：\n\(status?.logs.joined(separator: "\n") ?? "无")"
+        let text = "游界桥 2.6\n\(Date())\n\n引擎：用户态 TCP／UDP；指定网络出口绑定；不启用系统内核转发\n\n网络检测：\n\(inventoryJSON)\n\n状态灯：PS5 \(ps5Detail)；Mac \(macDetail)；网络出口 \(matchedHealth?.vpnDetail ?? vpnDetail)\n\n延迟：Mac → PS5 Ping \(ps5LatencyText)；经网络出口 → 8.8.8.8 Ping \(googleLatencyText)；Google HTTPS \(formatLatency(matchedHealth?.googleHTTPSLatency))\n\n目标连接（最多 12 个；Ping 可能由网络出口代答；TCP 建连不是游戏 RTT）：\n\(connectionText)\n\n本次流量：上传 \(traffic.uploadBytes) B；下载 \(traffic.downloadBytes) B；合计 \(traffic.totalBytes) B\n\n状态：\n\(status?.message ?? "尚未启动")\n\n日志：\n\(status?.logs.joined(separator: "\n") ?? "无")"
         do { try text.write(to: url, atomically: true, encoding: .utf8) }
         catch { errorMessage = error.localizedDescription }
     }
@@ -352,7 +383,7 @@ struct BridgeView: View {
                 HStack(alignment: .top, spacing: 16) { macCard; ps5Card }
                 hintsCard
                 diagnosticsCard
-                Text("停止使用后，将 PS5 的 IP 地址和 DNS 恢复为自动。建议在路由器中给 Mac 和 PS5 保留当前 IPv4 地址。")
+                Text("停止使用后，将各设备的 IP 地址和 DNS 恢复为自动。建议在路由器中给 Mac、PS5 和手机保留 IPv4 地址。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(26).frame(maxWidth: 1020).frame(maxWidth: .infinity)
         }.id(BridgePage.settings)
@@ -365,7 +396,7 @@ struct BridgeView: View {
                 .accessibilityLabel("手柄连接全球网络")
             VStack(alignment: .leading, spacing: 5) {
                 Text("游界桥").font(.system(size: 27, weight: .bold))
-                Text("通过 Mac 连接全球游戏网络 · 2.5").foregroundStyle(.secondary)
+                Text("PS5 与 iPhone · 双栈转发预览 · 2.6").foregroundStyle(.secondary)
             }
             Spacer()
             Picker("页面", selection: $model.selectedPage) {
@@ -401,7 +432,7 @@ struct BridgeView: View {
     }
 
     private var connectionCard: some View {
-        CollapsibleCard("连接状态", symbol: "network", key: "connections", summary: "\([model.ps5Online, model.macOnline, model.vpnOnline].filter { $0 }.count)/3 已连接") {
+        CollapsibleCard("连接状态", symbol: "network", key: "connections", summary: model.connectionSummary) {
             HStack(spacing: 10) {
                 ConnectionLamp(title: "PS5", online: model.ps5Online, detail: model.ps5Detail)
                     .help("局域网 Ping 可达，或最近 30 秒收到 PS5 转发数据时显示绿色。")
@@ -411,6 +442,22 @@ struct BridgeView: View {
                 Image(systemName: "arrow.right").foregroundStyle(.tertiary)
                 ConnectionLamp(title: "网络出口", online: model.vpnOnline, detail: model.vpnDetail)
                     .help(model.matchedHealth?.vpnDetail ?? "Google Ping 与 HTTPS 连通性检测。")
+            }
+            if !model.phoneAddress.isEmpty {
+                Divider()
+                HStack {
+                    ConnectionLamp(title: "iPhone", online: model.phoneOnline, detail: model.phoneOnline ? "已连接／通讯" : "等待连接")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(model.phoneAddress) · Ping \(model.phoneLatency)")
+                        Text("当前引擎 ↑ \(formatTraffic(Double(model.phoneReport?.uploadBytes ?? 0))) · ↓ \(formatTraffic(Double(model.phoneReport?.downloadBytes ?? 0)))")
+                    }.font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if model.displayedConfig?.dualStack == true {
+                Divider()
+                Text("IPv6 · \(model.status?.ipv6Status ?? "启动后检测出口")").font(.callout)
+                Text("当前引擎 IPv6：上传 \(model.status?.ipv6Packets ?? 0) 包 · 回包 \(model.status?.ipv6Replies ?? 0) 包。网关是否采用取决于设备；请用实际包数确认。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let status = model.status {
                 Text(status.running && !model.active ? "上次会话已结束，可以重新开始。" : status.message)
@@ -433,9 +480,9 @@ struct BridgeView: View {
                 Divider()
                 TrafficMetric(title: "总流量", value: formatTraffic(Double(model.traffic.totalBytes)), subtitle: "本次转发累计", symbol: "arrow.up.arrow.down")
             }.fixedSize(horizontal: false, vertical: true)
-            Text("每秒更新 · 上传／下载以 PS5 为参照 · 出口重连不会清零")
+            Text("每秒更新 · 上传／下载为所有已选设备合计 · 出口重连不会清零")
                 .font(.caption).foregroundStyle(.secondary)
-                .help("统计本次启动转发后 PS5 与 Mac 间的 IPv4 包长，含协议头，不含以太网和隧道外层开销；检测流量不计入。停止后保留结果，再次启动重新累计。")
+                .help("统计本次启动转发后所选设备与 Mac 间的 IPv4／IPv6 包长，含协议头，不含以太网和隧道外层开销；检测流量不计入。停止后保留结果，再次启动重新累计。")
         }
     }
 
@@ -454,9 +501,9 @@ struct BridgeView: View {
     }
 
     private var serverCard: some View {
-        CollapsibleCard("PS5 目标服务器", symbol: "server.rack", key: "servers", summary: "\(model.connections.count) 个目标 · 域名优先") {
+        CollapsibleCard("设备目标服务器", symbol: "server.rack", key: "servers", summary: "\(model.connections.count) 个目标 · 域名优先") {
             HStack(spacing: 12) {
-                Text("协议").frame(width: 42, alignment: .leading)
+                Text("协议").frame(width: 64, alignment: .leading)
                 Text("目标域名").frame(maxWidth: .infinity, alignment: .leading)
                 Text("端口").frame(width: 54, alignment: .trailing)
                 Text("出口 Ping").frame(width: 82, alignment: .trailing)
@@ -464,16 +511,16 @@ struct BridgeView: View {
                 Text("连接状态").frame(width: 76, alignment: .trailing)
             }.font(.caption).foregroundStyle(.secondary)
             if model.connections.isEmpty {
-                Text(model.ratesFresh ? "等待 PS5 建立新的连接…" : "开始转发后显示 PS5 实际访问的域名和端口。")
+                Text(model.ratesFresh ? "等待 PS5 或 iPhone 建立新的连接…" : "开始转发后显示设备实际访问的域名和端口。")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
             } else {
                 ForEach(model.connections) { row in
                     Divider()
                     HStack(spacing: 12) {
-                        Text(row.protocol).frame(width: 42, alignment: .leading)
+                        Text(row.protocol + (row.ip.contains(":") ? " v6" : " v4")).font(.caption).frame(width: 64, alignment: .leading)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(row.serverName).lineLimit(1).truncationMode(.middle)
-                            Text(row.domain == nil ? "未识别域名" : "\(row.domainSource ?? "域名")\((row.aliases?.count ?? 0) > 1 ? " · 同 IP 另有 \((row.aliases?.count ?? 1)-1) 个域名" : "")")
+                            Text((row.client == nil ? "" : (row.client == model.phoneAddress ? "iPhone · " : "PS5 · ")) + (row.domain == nil ? "未识别域名" : "\(row.domainSource ?? "域名")\((row.aliases?.count ?? 0) > 1 ? " · 同 IP 另有 \((row.aliases?.count ?? 1)-1) 个域名" : "")"))
                                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }.frame(maxWidth: .infinity, alignment: .leading).help(row.serverDetail)
                         Text(String(row.port)).frame(width: 54, alignment: .trailing)
@@ -493,7 +540,7 @@ struct BridgeView: View {
 
     private var macCard: some View {
         CollapsibleCard("配置 Mac", symbol: "wifi", key: "mac", summary: model.selectedLAN?.address ?? "待配置") {
-            Text("与 PS5 相同的网络").font(.callout).foregroundStyle(.secondary)
+            Text("与 PS5 和 iPhone 相同的网络").font(.callout).foregroundStyle(.secondary)
             Picker("网络", selection: $model.interfaceName) {
                 if model.inventory.interfaces.isEmpty { Text("未检测到局域网").tag("") }
                 ForEach(model.inventory.interfaces) { item in Text("\(item.title) · \(item.address)").tag(item.name) }
@@ -503,17 +550,27 @@ struct BridgeView: View {
                 SettingRow(label: "子网掩码", value: lan.mask)
             }
             Divider()
-            Text("PS5 当前的 IPv4 地址").font(.callout)
+            Text("PS5／主设备当前的 IPv4 地址").font(.callout)
             TextField("例如 192.168.50.100", text: $model.clientIP)
                 .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced)).disabled(model.active || model.busy)
-            Text(model.validation ?? "地址有效。请确认这个地址属于 PS5，而不是路由器。")
+            Toggle("同时转发 iPhone", isOn: $model.phoneEnabled).disabled(model.active || model.busy)
+            if model.phoneEnabled {
+                TextField("iPhone 当前的 IPv4 地址", text: $model.phoneIP)
+                    .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced)).disabled(model.active || model.busy)
+                Text("iPhone 与 PS5 使用各自的 IP，默认网关都填写上方 Mac 地址。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Toggle("启用 IPv6 转发", isOn: $model.ipv6Enabled).disabled(model.active || model.busy)
+            Text("IPv6 需要局域网已有 /64 地址前缀，且 VPN 支持 IPv6。验证出口后只向选定设备提供网关；若等待设备，请重连一次设备 Wi-Fi。停止时撤回，意外退出后网关最多约 45 秒过期。")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(model.validation ?? "地址有效。请确认这些地址属于设备，而不是路由器。")
                 .font(.caption).foregroundStyle(model.validation != nil && !model.clientIP.isEmpty ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity)
     }
 
     private var ps5Card: some View {
-        CollapsibleCard("设置 PS5", symbol: "gamecontroller", key: "ps5", summary: model.displayedConfig?.client ?? "待配置") {
+        CollapsibleCard("设置 PS5 与 iPhone", symbol: "gamecontroller", key: "ps5", summary: model.displayedConfig?.client ?? "待配置") {
             HStack {
                 Text("当前 Wi-Fi → 高级设定").font(.callout).foregroundStyle(.secondary)
                 Spacer()
@@ -528,14 +585,23 @@ struct BridgeView: View {
             SettingRow(label: "备用 DNS", value: "8.8.8.8")
             SettingRow(label: "MTU", value: "自动")
             SettingRow(label: "代理服务器", value: "不使用", emphasis: true)
-            Text("保存后，在 PS5 测试互联网连接并实际打开 YouTube 或游戏。")
+            if !model.phoneAddress.isEmpty {
+                Divider()
+                Text("iPhone：设置 → Wi-Fi → 当前网络旁的 ⓘ → 配置 IP → 手动")
+                    .font(.callout).foregroundStyle(.secondary)
+                SettingRow(label: "手机 IPv4", value: model.phoneAddress)
+                SettingRow(label: "路由器", value: model.displayedConfig?.gateway ?? "—", emphasis: true)
+                Text("子网掩码与上方相同，HTTP 代理关闭。在“配置 DNS”中确认有可用服务器；可手动填写 1.1.1.1、8.8.8.8（示例，并非强制）。保存后重新连接一次 Wi-Fi，再打开 Safari 验证。IPv6 网关由软件向选定设备提供。私有 Wi-Fi 地址建议使用该网络的“固定”模式，避免更换 MAC 后需要重启转发。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Text("保存后，在 PS5 或 iPhone 实际打开 YouTube／游戏，并检查各自的通讯状态和 IPv6 包数。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity)
     }
 
     private var hintsCard: some View {
         CollapsibleCard("使用提示", symbol: "info.circle", key: "hints") {
-            Text("本工具共享 IPv4。若 PS5 同时使用 IPv6，它可能绕过 Mac；要让这些流量也遵循本方案，请在路由器上关闭该网络的 IPv6。两台设备不要使用开启设备隔离的访客 Wi-Fi。")
+            Text("PS5 和 iPhone 可同时转发。手机在 Wi-Fi 详情中将“配置 IP”设为手动，保留自己的 IPv4 和子网掩码，“路由器”填写 Mac 地址，HTTP 代理关闭。IPv6 会单独验证出口并向已选设备提供网关；请查看实际 IPv6 包数，未开启或尚未收到网关时 IPv6 可能经原路由器。避免访客 Wi-Fi 和设备隔离。")
                 .font(.callout).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -556,8 +622,8 @@ struct BridgeView: View {
 
     private var helpSheet: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("让 PS5 通过 Mac 连接全球游戏网络").font(.title2.bold())
-            Text("1. Mac 和 PS5 连接同一路由器的普通 Wi-Fi。\n\n2. Mac 连接 Shadowrocket；测试期间可选择全局代理。\n\n3. 切换到“设置”，展开“配置 Mac”，填写 PS5 当前 IPv4 地址，在顶部点击“开始转发”。\n\n4. 在“设置”页面展开“设置 PS5”，按参数手动设置 PS5；默认网关是 Mac 地址，代理服务器选“不使用”。\n\n5. 切换到“监控”查看状态、流量、延迟与目标服务器，并在 PS5 打开 YouTube 或游戏实测。节点需支持相应 UDP 流量；本工具不保证降低延迟或改变 PSN NAT 类型。\n\n6. 停止使用时点击顶部“停止转发”，把 PS5 的 IP 和 DNS 改回自动。关闭应用后转发自动停止，本版不改写系统转发、路由或防火墙规则。")
+            Text("让 PS5 和 iPhone 通过 Mac 连接全球网络").font(.title2.bold())
+            Text("1. Mac 和 PS5 连接同一路由器的普通 Wi-Fi。\n\n2. Mac 连接 Shadowrocket；测试期间可选择全局代理。\n\n3. 切换到“设置”，展开“配置 Mac”，填写 PS5 当前 IPv4 地址，在顶部点击“开始转发”。\n\n4. 在“设置”页面展开“设置 PS5”，按参数手动设置 PS5；默认网关是 Mac 地址，代理服务器选“不使用”。\n\n5. 切换到“监控”查看状态、流量、延迟与目标服务器，并在 PS5 打开 YouTube 或游戏实测。需要同时使用 iPhone 时，在配置 Mac 勾选手机并填写它自己的 IPv4，手机“路由器”也填写 Mac 地址。IPv6 需勾选开关、现有局域网 /64 前缀和可用 IPv6 出口；若等待设备，重连设备 Wi-Fi，再看实际 IPv6 包数。节点需支持相应 UDP 流量；本工具不保证降低延迟或改变 PSN NAT 类型。\n\n6. 停止使用时点击顶部“停止转发”，把 PS5 的 IP 和 DNS 改回自动。关闭应用后转发自动停止，本版不改写系统转发、路由或防火墙规则。开启 IPv6 时会向选定设备提供短期 IPv6 网关，停止后撤回。")
                 .lineSpacing(5).fixedSize(horizontal: false, vertical: true)
             Text("点击顶部“监控／设置”切换页面，不会停止转发或重置统计。卡片默认折叠，整条标题栏均可点击，并记住你的选择。转发权限检测与诊断导出位于“设置 → 诊断与日志”。域名来自连接主机名或 PS5 的 DNS 回应；加密路径与加密主机名不可见时不会猜测。")
                 .font(.callout).foregroundStyle(.secondary)

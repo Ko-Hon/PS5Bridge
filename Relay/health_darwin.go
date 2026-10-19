@@ -20,18 +20,19 @@ import (
 )
 
 type healthReport struct {
-	Config             configuration `json:"config"`
-	VPN                string        `json:"vpn"`
-	LANReady           bool          `json:"lanReady"`
-	PS5Reachable       bool          `json:"ps5Reachable"`
-	PS5Latency         float64       `json:"ps5Latency"`
-	VPNReachable       bool          `json:"vpnReachable"`
-	GooglePing         bool          `json:"googlePing"`
-	GoogleLatency      float64       `json:"googleLatency"`
-	VPNDetail          string        `json:"vpnDetail"`
-	CheckedAt          float64       `json:"checkedAt"`
-	GoogleHTTPSLatency *float64      `json:"googleHTTPSLatency,omitempty"`
-	ServerPings        []serverPing  `json:"serverPings"`
+	Config             configuration  `json:"config"`
+	VPN                string         `json:"vpn"`
+	LANReady           bool           `json:"lanReady"`
+	PS5Reachable       bool           `json:"ps5Reachable"`
+	PS5Latency         float64        `json:"ps5Latency"`
+	VPNReachable       bool           `json:"vpnReachable"`
+	GooglePing         bool           `json:"googlePing"`
+	GoogleLatency      float64        `json:"googleLatency"`
+	VPNDetail          string         `json:"vpnDetail"`
+	CheckedAt          float64        `json:"checkedAt"`
+	GoogleHTTPSLatency *float64       `json:"googleHTTPSLatency,omitempty"`
+	ServerPings        []serverPing   `json:"serverPings"`
+	Devices            []deviceHealth `json:"devices"`
 }
 
 type serverPing struct {
@@ -59,7 +60,7 @@ func serverTargets(encoded string) ([]string, error) {
 	var targets []string
 	for _, host := range input {
 		ip, err := netip.ParseAddr(host)
-		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		if err != nil || !ip.IsGlobalUnicast() || ip.Is4In6() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			continue
 		}
 		host = ip.String()
@@ -135,8 +136,11 @@ func isEchoReply(b, nonce []byte, seq uint16) bool {
 // An unprivileged ICMP datagram socket; never invokes a shell or opens BPF.
 func pingBound(ctx context.Context, index int, target string) (float64, error) {
 	ip, err := netip.ParseAddr(target)
-	if err != nil || !ip.Is4() || index <= 0 {
+	if err != nil || index <= 0 || (!ip.Is4() && !ip.Is6()) {
 		return 0, fmt.Errorf("invalid ping destination/interface")
+	}
+	if ip.Is6() {
+		return ping6Bound(ctx, index, ip)
 	}
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_ICMP)
 	if err != nil {
@@ -276,6 +280,21 @@ func runHealth(encoded, vpnName, encodedTargets string) error {
 			report.PS5Reachable = err == nil
 			report.PS5Latency = n
 		}()
+	}
+	report.Devices = make([]deviceHealth, len(cfg.AdditionalClients))
+	for i, target := range cfg.AdditionalClients {
+		ip, err := netip.ParseAddr(target)
+		if !report.LANReady || err != nil || !ip.Is4() || !ip.IsPrivate() {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, target string) {
+			defer wg.Done()
+			c, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+			defer cancel()
+			n, err := pingBound(c, lan.Index, target)
+			report.Devices[i] = deviceHealth{IP: target, Reachable: err == nil, Latency: n}
+		}(i, target)
 	}
 	if vpn, err := net.InterfaceByName(vpnName); err == nil && vpn.Flags&net.FlagUp != 0 && len(vpnName) > 4 && vpnName[:4] == "utun" {
 		wg.Add(1)

@@ -27,6 +27,19 @@ import Darwin
         let decoded = try JSONDecoder().decode(BridgeConfiguration.self, from: data)
         expect(decoded == config("10.42.0.50"), "configuration round trip")
         expect(ps5Settings(config("10.42.0.50")).contains("代理服务器：不使用"), "gateway instructions do not enable HTTP proxy")
+        var dual = config("10.42.0.50")
+        dual.additionalClients = ["10.42.0.60"]; dual.ipv6Enabled = true
+        expect((try? dual.validate(against: inventory)) != nil, "PS5 and iPhone accepted together")
+        let decodedDual = try JSONDecoder().decode(BridgeConfiguration.self, from: JSONEncoder().encode(dual))
+        expect(decodedDual == dual, "dual-stack configuration round trip")
+        expect(ps5Settings(dual).contains("iPhone") && ps5Settings(dual).contains("IPv6"), "copied settings include phone and IPv6 guidance")
+        for invalid in ["10.42.0.50", "10.42.0.10", "10.42.1.60", "10.42.0.255", ""] {
+            var bad = dual; bad.additionalClients = [invalid]
+            expect((try? bad.validate(against: inventory)) == nil, "reject invalid additional device: \(invalid)")
+        }
+        let legacy = Data("{\"interface\":\"en0\",\"gateway\":\"10.42.0.10\",\"mask\":\"255.255.255.0\",\"client\":\"10.42.0.50\"}".utf8)
+        let legacyConfig = try JSONDecoder().decode(BridgeConfiguration.self, from: legacy)
+        expect(!legacyConfig.dualStack && legacyConfig.clients.count == 1, "legacy configurations remain IPv4 single-device")
         let probe = try command("/usr/bin/printf", ["hello"])
         expect(probe.code == 0 && probe.output == "hello", "subprocess output drains without waiting for EOF")
         let began = Date()
