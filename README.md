@@ -26,7 +26,7 @@
 
 游界桥是一款面向 Apple Silicon Mac 的原生网络转发工具。先在 Mac 上通过 Shadowrocket 建立可用的 VPN／TUN 连接，再开启游界桥并把 PS5 的 IPv4 默认网关设为 Mac，PS5 的 IPv4 TCP/UDP 流量即可经这个出口转发到游戏或视频服务。
 
-当前预览版本：**2.6.1 · Build 13**。2.6 的双设备手动接入已完成实体 IPv4 通讯验证；2.6.1 自动接入已通过双设备回环与隔离测试，实体设备验证待完成系统授权后核对。其他网络环境和游戏需自行验证。
+当前预览版本：**2.6.1 · Build 13**。iPhone 已在未预填设备 IP 的情况下自动接入，确认 TCP／UDP 收发及网页、视频流量；双设备自动接入已通过回环与隔离测试，PS5 的本次自动接入实机流量仍待核对。2.6 的双设备手动接入已完成实体 IPv4 通讯验证。其他网络环境和游戏需自行验证。
 
 [下载预览版](https://github.com/Ko-Hon/PS5Bridge/releases/tag/v2.6.1-preview.1) · [下载稳定版](https://github.com/Ko-Hon/PS5Bridge/releases/latest) · [详细使用说明](docs/使用说明.md) · [工作原理](docs/工作原理.md) · [验证记录](docs/验证记录.md) · [反馈问题](https://github.com/Ko-Hon/PS5Bridge/issues)
 
